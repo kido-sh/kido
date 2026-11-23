@@ -11,6 +11,14 @@
 
 ## Install
 
+    curl -fsSL https://kido.sh/install.sh | sh
+    curl -fsSL https://kido.sh/install.sh | sh -s -- --prefix ~/opt/kido --version 0.1.0 --no-setup
+    brew install kido-sh/tap/kido
+
+The script puts kido into `~/.local` (no sudo), checks the release's signature and SHA-256 and then
+runs `kido setup`, which pulls the Darwin image. `--image REF` pulls another base image, and
+`--no-setup` skips `kido setup`. After `brew install`, run `kido setup` yourself.
+
 From source, with Go 1.26 and the Xcode command line tools:
 
     git clone https://github.com/kido-sh/kido.git
@@ -18,15 +26,6 @@ From source, with Go 1.26 and the Xcode command line tools:
     make                          # bin/kido, bin/kido-agent and bin/kido-vmm
     make install PREFIX=~/.local  # signs them ad hoc, installs bin/kido and libexec/kido/
     make dist                     # dist/kido-VERSION-darwin-arm64.tar.gz, install.sh and SHA256SUMS
-
-From the first release on, there is also an install script and a Homebrew formula. The script puts
-kido into `~/.local` (no sudo), checks the release's signature and SHA-256 and then runs
-`kido setup`, which pulls the Darwin image. `--image REF` pulls another base image, and
-`--no-setup` skips `kido setup`.
-
-    curl -fsSL https://kido.sh/install.sh | sh
-    curl -fsSL https://kido.sh/install.sh | sh -s -- --prefix ~/opt/kido --version 0.1.0 --no-setup
-    brew install kido-sh/tap/kido
 
 `kido upgrade` upgrades a kido from the install script or a release tarball. It downloads the
 latest release from GitHub and checks its signature and SHA-256. Then it replaces kido and its

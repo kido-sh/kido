@@ -17,19 +17,19 @@ Darwin kido 25.5.0 Darwin Kernel Version 25.5.0: Mon Nov 23 13:26:52 UTC 2026; n
 
 You need an Apple Silicon Mac with macOS 15 or later. kido needs neither Docker nor root.
 
-Until the first release is out, build kido from source. This needs Go and the Xcode command line
-tools.
-
 ```sh
-git clone https://github.com/kido-sh/kido.git
-cd kido
-make install PREFIX=~/.local
+curl -fsSL https://kido.sh/install.sh | sh
 export PATH="$HOME/.local/bin:$PATH"
-kido setup
 kido run --rm darwin sw_vers
 ```
 
-`kido setup` pulls the Darwin image, a download of about 40 MB.
+The script installs kido into `~/.local` and checks the release's signature. Then it runs
+`kido setup`, which pulls the Darwin image, a download of about 40 MB.
+
+With Homebrew, run `brew install kido-sh/tap/kido` and then `kido setup`.
+
+`kido upgrade` installs the latest release. Homebrew users run `brew upgrade kido` instead. To build
+kido from source, see [docs/usage.md](docs/usage.md#install).
 
 ## Examples
 
