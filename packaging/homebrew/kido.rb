@@ -1,7 +1,7 @@
 # Template for the formula in the kido-sh/tap tap (`brew install kido-sh/tap/kido`). For a release,
 # set the tag and the sha256 (`shasum -a 256` of the source tarball).
 class Kido < Formula
-  desc "Docker-like CLI that runs macOS arm64 command-line tools in Darwin micro-VMs"
+  desc "Run macOS arm64 command-line tools in Darwin micro-VMs"
   homepage "https://kido.sh"
   url "https://github.com/kido-sh/kido/archive/refs/tags/v0.1.0.tar.gz"
   sha256 "0000000000000000000000000000000000000000000000000000000000000000"

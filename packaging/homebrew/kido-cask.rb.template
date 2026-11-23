@@ -7,7 +7,7 @@ cask "kido" do
 
   url "https://github.com/kido-sh/kido/releases/download/v#{version}/kido-#{version}.pkg"
   name "kido"
-  desc "Docker-like CLI that runs macOS arm64 command-line tools in Darwin micro-VMs"
+  desc "Run macOS arm64 command-line tools in Darwin micro-VMs"
   homepage "https://kido.sh"
 
   depends_on arch: :arm64

@@ -40,7 +40,7 @@ check "stop"                    0 "$kido" stop e2e
 check "rm"                      0 "$kido" rm e2e
 check "rmi"                     0 "$kido" rmi darwin-e2e:1
 
-# Docker parity: help, lifecycle, images, prune.
+# Help, lifecycle, images, prune.
 checko() {
   local name=$1 want=$2 needle=$3; shift 3
   local out rc
@@ -150,7 +150,7 @@ checko "build without PATH"   125 "requires exactly 1 argument" "$kido" build -t
 checko "build --help"           0 "--no-cache" "$kido" build --help
 checko "pull unknown flag"    125 "unknown flag: --bogus" "$kido" pull --bogus x
 mkdir -p "$KIDO_HOME/ctx" && printf 'FROM darwin\nRUN echo hi > /hi\n' > "$KIDO_HOME/ctx/Dockerfile"
-checko "build tags like Docker" 0 "Successfully tagged e2e-b:1" "$kido" build -t e2e-b:1 "$KIDO_HOME/ctx"
+checko "build prints the tag"   0 "Successfully tagged e2e-b:1" "$kido" build -t e2e-b:1 "$KIDO_HOME/ctx"
 check  "build -q prints the ID" 0 sh -c 'id=$("$1" build -q -t e2e-b:2 "$2") && test "$id" = "sha256:$("$1" images -q --no-trunc e2e-b:2)"' sh "$kido" "$KIDO_HOME/ctx"
 check  "rmi built images"       0 "$kido" rmi e2e-b:1 e2e-b:2
 checko "completion help eval"   0 'eval "$(kido completion bash)"' "$kido" completion --help

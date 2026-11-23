@@ -29,7 +29,7 @@ Start with `kido doctor`. Every failed check prints its fix.
 - **KIDO_HOME too long**: `kido commit` of a running QEMU container pauses it through a unix socket
   under `$KIDO_HOME`. This limits `$KIDO_HOME` to 66 characters. Other commands work with a longer
   one.
-- **Docker-free WARN**: registry commands read Docker's `config.json`. A `credsStore` helper that
+- **Credentials WARN**: registry commands read `~/.docker/config.json`. A `credsStore` helper that
   is not on PATH makes pulls and pushes anonymous.
 - **Timers 20 ms late under QEMU**: macOS may clamp a shell to a utility or background QoS, for
   example a shell started by a launchd agent without `ProcessType=Interactive`. QEMU inherits the

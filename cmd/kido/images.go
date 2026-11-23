@@ -62,7 +62,7 @@ func ctrImages(ctx context.Context, args []string) int {
 	fs := ctrFlags("images", "[OPTIONS] [REPOSITORY[:TAG]]")
 	quiet := fs.Bool("q", false, "only show image IDs")
 	fs.BoolVar(quiet, "quiet", false, "only show image IDs")
-	all := fs.Bool("a", false, "show all images (kido has no intermediate images; accepted for Docker compatibility)")
+	all := fs.Bool("a", false, "accepted, but kido has no intermediate images to show")
 	fs.BoolVar(all, "all", false, "show all images")
 	noTrunc := fs.Bool("no-trunc", false, "don't truncate output")
 	format := fs.String("format", "", "format output with a Go template, 'table TEMPLATE' or 'json'")

@@ -65,7 +65,7 @@ build on it with `FROM darwin`.
     kido pull ghcr.io/kido-sh/darwin:26.5             # stored as ghcr.io/kido-sh/darwin:26.5
     kido pull ghcr.io/kido-sh/darwin:26.5 darwin:26.5 # stored as darwin:26.5
 
-Like Docker, `kido run`, `kido create` and `kido build` pull an image first if it is not here.
+`kido run`, `kido create` and `kido build` pull an image first if it is not here.
 `--pull never` turns this off for `run` and `create`.
 
 A base image can also be a directory. It holds `disk.img` (a raw GPT disk with an EFI partition
@@ -86,8 +86,8 @@ kernel collection) and `image.json` (with the root file system's `"rootUUID"`).
     $ kido rm -f box
 
 Containers keep `/tmp` across stop, start and commit. `-u` and a Dockerfile `USER` may name any
-uid, with or without a passwd entry. `kido push` and `kido pull` share credentials with Docker
-(`~/.docker/config.json`).
+uid, with or without a passwd entry. `kido login`, `kido push` and `kido pull` keep registry
+credentials in `~/.docker/config.json`.
 
 ## Backends
 
@@ -104,9 +104,9 @@ uid, with or without a passwd entry. `kido push` and `kido pull` share credentia
 
 ## Networks
 
-- **QEMU**: the guest sits behind QEMU's user-mode NAT. Outbound TCP, UDP and DNS work. Like
-  Docker Desktop's `host.docker.internal`, the guest reaches every service on the host's loopback
-  (127.0.0.1) at 10.0.2.2. That includes other containers' published ports and local dev servers.
+- **QEMU**: the guest sits behind QEMU's user-mode NAT. Outbound TCP, UDP and DNS work. The guest
+  reaches every service on the host's loopback (127.0.0.1) at 10.0.2.2. That includes other
+  containers' published ports and local dev servers.
   `--network none` cuts the guest off from both the host and the outside.
 - **Virtualization.framework, default network**: every container sits on vmnet's shared NAT
   network (192.168.64.0/24; set `KIDO_VZ_SUBNET` if yours differs). These containers share one
@@ -133,11 +133,11 @@ uid, with or without a passwd entry. `kido push` and `kido pull` share credentia
     stops. If it is killed while containers run, they lose the network until they restart. macOS
     then keeps the subnet reserved until about a minute after the last VM on vmnet stops (from
     any tool), and the next start waits up to two minutes for it.
-  - The host reaches every container's address, as Docker does on Linux.
+  - The host reaches every container's address.
 - **Published ports** (`-p`) bind to 127.0.0.1 unless you name another address, on both backends
   and with `--network none`. kido does not use vmnet's own port forwarding, because it would also
   listen on the Mac's LAN addresses. For UDP on the Virtualization.framework backend, each client
-  keeps its own relay until neither side has sent anything for 90 seconds, as with Docker's proxy.
+  keeps its own relay until neither side has sent anything for 90 seconds.
 
 ## Copy mounts: `-v` and `--mount type=bind`
 
@@ -155,12 +155,12 @@ files. They are not live bind mounts.
 
 ## Commands
 
-`kido COMMAND --help` lists every flag. Flags follow Docker's where they mean the same thing.
+`kido COMMAND --help` lists every flag.
 
 | Command | What it does |
 |---|---|
 | `run` | Create a container from an image and run a command in it (`-it --rm -d --name -e --env-file -w -u -p -v --mount --network --cpus -m --entrypoint --pull`) |
-| `create`, `start`, `stop`, `restart`, `kill`, `wait` | Container lifecycle, as in Docker (`start -a -i`, `kill -s`). `stop` and `restart` send SIGTERM to the main process, wait `-t` seconds (default 10), then send SIGKILL. Only then do they copy `-v` mounts back and power off |
+| `create`, `start`, `stop`, `restart`, `kill`, `wait` | Container lifecycle (`start -a -i`, `kill -s`). `stop` and `restart` send SIGTERM to the main process, wait `-t` seconds (default 10), then send SIGKILL. Only then do they copy `-v` mounts back and power off |
 | `exec` | Run a command in a running container (`-it -d -e --env-file -w -u`) |
 | `top` | Run `ps` in the container's VM (`ps -ef` by default, or the `ps` options given after the container) |
 | `export` | Write a container's file system as a tar archive (`-o FILE`, or stdout). A stopped container boots without its command for this. Sockets and device nodes are skipped with a warning |
@@ -171,22 +171,22 @@ files. They are not live bind mounts.
 | `images`, `rmi`, `tag`, `save`, `load` | List, remove and tag images; save them to and load them from an OCI-layout tar archive |
 | `history` | An image's parent chain: ID, created, created-by and comment when recorded, size (`-H --no-trunc -q --format`) |
 | `image import` | Import a base image directory (`disk.img`, `kernel`, `initrd.cpio`, `image.json`) |
-| `pull`, `push`, `login` | OCI registries; credentials are shared with Docker's `~/.docker/config.json` |
-| `container`, `image`, `system` | Docker-style groups, with `ls`, `prune`, `system df` and `system info` |
+| `pull`, `push`, `login` | OCI registries, with credentials in `~/.docker/config.json` |
+| `container`, `image`, `system` | Command groups, with `ls`, `prune`, `system df` and `system info` |
 | `network` | User networks for the Virtualization.framework backend, macOS 26+ (`create --subnet --internal`, `ls`, `inspect`, `rm`, `prune`) |
 | `setup` | Pull the Darwin image, and install QEMU for the QEMU backend |
-| `doctor` | Check the Mac, the VM backend, KIDO_HOME, images, disk space and that no Docker is needed |
+| `doctor` | Check the Mac, the VM backend, KIDO_HOME, images, disk space and registry credentials |
 | `upgrade` | Replace this kido with the latest signed release (`--check`, `--version`) |
 | `info`, `version`, `completion` | System information, version, shell completion (bash, zsh, fish) |
 
 `ps`, `images`, `history`, `inspect`, `version` and `info` take `--format` (a Go template, `table`
-or `json`). `inspect` templates use kido's own field names (a container's `{{.ID}}`,
-`{{.State}}`), not Docker's (`{{.Id}}`, `{{.State.Running}}`).
+or `json`). `inspect` templates use kido's field names, such as a container's `{{.ID}}` and
+`{{.State}}`.
 
 Not there yet: `attach`, `stats`, `pause`, `diff`, `logout` and restart policies.
 
-The exit status follows Docker: the command's own status, 125 when kido itself fails, and 126 or
-127 when the guest cannot run or find the program. A failed `kido build` exits with the status of
+The exit status is the command's own status, 125 when kido itself fails, and 126 or 127 when the
+guest cannot run or find the program. A failed `kido build` exits with the status of
 its RUN step.
 
 ## Environment
@@ -209,7 +209,7 @@ its RUN step.
      |     VZ:   kido-vmm (Virtualization.framework, APFS clone of disk.img, vmnet)
      |-- internal/build: Dockerfile subset on top of the engine (RUN in a build VM)
      |-- internal/mount: copy mounts (-v) through tar disks
-     |-- internal/registry: OCI push/pull (zstd disk layer, image config, Docker credentials)
+     |-- internal/registry: OCI push/pull (zstd disk layer, image config, registry credentials)
      '-- internal/setup: QEMU download, verify, unpack, sign; kido doctor
             |
             | 127.0.0.1:<random port> --> guest port 1023, authenticated and encrypted

@@ -30,7 +30,7 @@ func hiddenCommand(name string) bool { return strings.HasPrefix(name, "__") }
 
 func usage(w io.Writer) {
 	fmt.Fprint(w, "Usage:  kido [OPTIONS] COMMAND\n\n"+
-		"Run macOS arm64 command-line tools in Darwin micro-VMs, the Docker way\n\n"+
+		"Run macOS arm64 command-line tools in Darwin micro-VMs\n\n"+
 		"Options:\n"+
 		"  -h, --help       Print usage\n"+
 		"  -v, --version    Print version information and quit\n")

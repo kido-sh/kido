@@ -59,8 +59,8 @@ func init() {
 }
 
 func runDoctor(ctx context.Context, args []string) int {
-	fl := ctrFlags("doctor", "\n\nChecks the Mac, the VM backend, KIDO_HOME, disk space, the local images and that nothing needs\n"+
-		"Docker, and prints a fix for each problem. Exit status 1 when a check fails.")
+	fl := ctrFlags("doctor", "\n\nChecks the Mac, the VM backend, KIDO_HOME, disk space, the local images and the registry\n"+
+		"credentials, and prints a fix for each problem. Exit status 1 when a check fails.")
 	if err := fl.Parse(args); err != nil {
 		return 125
 	}
@@ -79,7 +79,7 @@ func runDoctor(ctx context.Context, args []string) int {
 	case "vz":
 		results = append(results, checkVMM())
 	}
-	results = append(results, checkHome(home, backend), checkDiskSpace(home), checkImages(home), checkDocker())
+	results = append(results, checkHome(home, backend), checkDiskSpace(home), checkImages(home), checkCredentials())
 
 	fmt.Println("kido", version)
 	failed, warned := 0, 0
@@ -428,30 +428,29 @@ func firstLine(s string) string {
 	return strings.TrimSpace(line)
 }
 
-// checkDocker confirms that kido runs without Docker, and flags a Docker credential helper that kido's
-// registry commands would call (they read Docker's config.json) but cannot find.
-func checkDocker() checkResult {
-	const name = "Docker-free"
-	detail := "no Docker daemon or Docker VM needed: each container is its own VM, and images live in KIDO_HOME"
+// checkCredentials flags a credential helper that config.json names, which kido's registry commands
+// would call but cannot find.
+func checkCredentials() checkResult {
+	const name = "Credentials"
 	dir := os.Getenv("DOCKER_CONFIG")
 	if dir == "" {
 		uh, err := os.UserHomeDir()
 		if err != nil {
-			return pass(name, detail)
+			return pass(name, "no home directory, so no stored registry credentials")
 		}
 		dir = filepath.Join(uh, ".docker")
 	}
 	cfgPath := filepath.Join(dir, "config.json")
 	b, err := os.ReadFile(cfgPath)
 	if err != nil {
-		return pass(name, detail)
+		return pass(name, "none stored yet; kido login stores them in "+cfgPath)
 	}
 	var cfg struct {
 		CredsStore  string            `json:"credsStore"`
 		CredHelpers map[string]string `json:"credHelpers"`
 	}
 	if err := json.Unmarshal(b, &cfg); err != nil {
-		return warn(name, detail+"; "+cfgPath+" is not valid JSON",
+		return warn(name, cfgPath+" is not valid JSON",
 			"kido pull, push and login read registry credentials from it: repair it or move it away")
 	}
 	helpers := []string{cfg.CredsStore}
@@ -471,12 +470,12 @@ func checkDocker() checkResult {
 		}
 	}
 	if len(missing) > 0 {
-		return warn(name, detail+"; "+cfgPath+" names "+strings.Join(missing, ", ")+", which is not on PATH",
-			"registry pulls and pushes go anonymous: put the helper on PATH (Docker Desktop ships it in ~/.docker/bin), "+
+		return warn(name, cfgPath+" names "+strings.Join(missing, ", ")+", which is not on PATH",
+			"registry pulls and pushes go anonymous: put the helper on PATH, "+
 				"or drop credsStore/credHelpers from config.json and run `kido login SERVER`")
 	}
 	if len(found) > 0 {
-		return pass(name, detail+"; registry credentials come from "+strings.Join(found, ", "))
+		return pass(name, "from "+strings.Join(found, ", ")+", which "+cfgPath+" names")
 	}
-	return pass(name, detail)
+	return pass(name, "stored in "+cfgPath)
 }

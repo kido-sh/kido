@@ -18,7 +18,7 @@ func init() {
 func regPush(ctx context.Context, args []string) int {
 	fs := ctrFlags("push", "[OPTIONS] NAME[:TAG] [REMOTE_REF]\n\n"+
 		"REMOTE_REF defaults to NAME[:TAG].\n"+
-		"Credentials come from Docker's config (`docker login` or `kido login`); registries on\n"+
+		"Credentials come from ~/.docker/config.json, which `kido login` writes. Registries on\n"+
 		"localhost or 127.0.0.1 are reached over plain HTTP, all others over HTTPS.")
 	quiet := fs.Bool("q", false, "suppress progress output")
 	fs.BoolVar(quiet, "quiet", false, "suppress progress output")

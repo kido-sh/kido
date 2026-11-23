@@ -1,8 +1,8 @@
 # kido
 
-kido runs macOS command-line tools in small Darwin VMs on Apple Silicon Macs. You use it like
-Docker, with `kido run`, `kido build` and `kido push`. Each container boots a real Darwin kernel
-(XNU) in under a second.
+kido runs macOS command-line tools in small Darwin VMs on Apple Silicon Macs. `kido run` starts a
+container, `kido build` makes an image and `kido push` shares it. Each container boots a real Darwin
+kernel (XNU) in under a second.
 
 ```console
 $ kido run --rm darwin sw_vers
@@ -15,7 +15,7 @@ Darwin kido 25.5.0 Darwin Kernel Version 25.5.0: Mon Nov 23 13:26:52 UTC 2026; n
 
 ## Quick start
 
-You need an Apple Silicon Mac with macOS 15 or later. kido needs neither Docker nor root.
+You need an Apple Silicon Mac with macOS 15 or later. kido never needs root.
 
 ```sh
 curl -fsSL https://kido.sh/install.sh | sh
@@ -119,4 +119,4 @@ kido's Darwin system builds on [PureDarwin](https://github.com/PureDarwin/PureDa
 [open-source releases](https://opensource.apple.com/) and on NeoDarwin's
 [corecrypto](https://github.com/NeoDarwinOS/corecrypto). Thank you all.
 
-kido is an independent project. It is not affiliated with Apple, Docker, PureDarwin or NeoDarwin.
+kido is an independent project. It is not affiliated with Apple, PureDarwin or NeoDarwin.

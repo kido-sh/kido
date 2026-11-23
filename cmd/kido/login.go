@@ -15,13 +15,13 @@ import (
 )
 
 func init() {
-	register("login", "Log in to an OCI registry (stored like docker login)", regLogin)
+	register("login", "Log in to an OCI registry", regLogin)
 }
 
 func regLogin(ctx context.Context, args []string) int {
 	fs := ctrFlags("login", "[OPTIONS] [SERVER]\n\n"+
-		"Checks the credentials against SERVER (default Docker Hub) and stores them like\n"+
-		"`docker login` does: in Docker's credential helper, or in ~/.docker/config.json.")
+		"Checks the credentials against SERVER (default docker.io) and stores them in the credential\n"+
+		"helper that ~/.docker/config.json names, or in that file.")
 	username := fs.String("u", "", "username")
 	fs.StringVar(username, "username", "", "username")
 	passwordStdin := fs.Bool("password-stdin", false, "read the password from stdin")
