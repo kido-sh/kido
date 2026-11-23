@@ -207,9 +207,10 @@ func TestParseRemote(t *testing.T) {
 		{"localhost:5001/darwin", "localhost:5001", "darwin", "localhost:5001", "latest"},
 		{"127.0.0.1:5001/x/darwin:v1", "127.0.0.1:5001", "x/darwin", "127.0.0.1:5001", "v1"},
 		{"ghcr.io/me/darwin:1.0", "ghcr.io", "me/darwin", "ghcr.io", "1.0"},
-		{"darwin", dockerHubHost, "library/darwin", dockerHubAuthKey, "latest"},
-		{"me/darwin:t", dockerHubHost, "me/darwin", dockerHubAuthKey, "t"},
+		{"darwin", "ghcr.io", "kido-sh/darwin", "ghcr.io", "latest"},
+		{"me/darwin:t", "ghcr.io", "me/darwin", "ghcr.io", "t"},
 		{"docker.io/darwin", dockerHubHost, "library/darwin", dockerHubAuthKey, "latest"},
+		{"docker.io/me/darwin", dockerHubHost, "me/darwin", dockerHubAuthKey, "latest"},
 	} {
 		r, err := parseRemote(c.in)
 		if err != nil {
@@ -224,6 +225,23 @@ func TestParseRemote(t *testing.T) {
 	}
 	if r, _ := parseRemote("ghcr.io/me/darwin"); r.insecure {
 		t.Error("ghcr.io must use HTTPS")
+	}
+}
+
+func TestParseServer(t *testing.T) {
+	for _, c := range []struct{ in, host, key string }{
+		{"", "ghcr.io", "ghcr.io"},
+		{"https://ghcr.io/", "ghcr.io", "ghcr.io"},
+		{"docker.io", dockerHubHost, dockerHubAuthKey},
+		{"localhost:5001", "localhost:5001", "localhost:5001"},
+	} {
+		r, err := parseServer(c.in)
+		if err != nil || r.host != c.host || r.authKey != c.key {
+			t.Errorf("%q: got %+v, %v", c.in, r, err)
+		}
+	}
+	if _, err := parseServer("foo"); err == nil {
+		t.Error("foo is not a registry address")
 	}
 }
 

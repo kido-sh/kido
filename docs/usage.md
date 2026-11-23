@@ -65,6 +65,10 @@ build on it with `FROM darwin`.
     kido pull ghcr.io/kido-sh/darwin:26.5             # stored as ghcr.io/kido-sh/darwin:26.5
     kido pull ghcr.io/kido-sh/darwin:26.5 darwin:26.5 # stored as darwin:26.5
 
+A name without a registry comes from ghcr.io. A name without a namespace comes from kido-sh there,
+so `darwin` means `ghcr.io/kido-sh/darwin` and `me/tool` means `ghcr.io/me/tool`. `kido login`
+without a server logs in to ghcr.io.
+
 `kido run`, `kido create` and `kido build` pull an image first if it is not here.
 `--pull never` turns this off for `run` and `create`.
 

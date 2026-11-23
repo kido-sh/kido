@@ -41,15 +41,18 @@ func Login(ctx context.Context, server, username, password string) (string, erro
 	return storeCredential(ctx, r.authKey, cred)
 }
 
-// parseServer accepts a host[:port], optionally with a scheme and a path. Empty means docker.io.
+// parseServer accepts a host[:port], optionally with a scheme and a path. Empty means ghcr.io.
 func parseServer(s string) (remote, error) {
 	host := strings.TrimPrefix(strings.TrimPrefix(strings.ToLower(s), "https://"), "http://")
 	host, _, _ = strings.Cut(host, "/")
 	if host == "" {
-		host = "docker.io"
+		host = defaultHost
+	}
+	if !isRegistryHost(host) {
+		return remote{}, fmt.Errorf("invalid registry address %q", printable(s))
 	}
 	r, err := parseRemote(host + "/login")
-	if err != nil || (r.host == dockerHubHost && host != "docker.io" && host != "index.docker.io" && host != dockerHubHost) {
+	if err != nil {
 		return remote{}, fmt.Errorf("invalid registry address %q", printable(s))
 	}
 	return r, nil

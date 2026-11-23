@@ -21,6 +21,8 @@ import (
 )
 
 const (
+	defaultHost      = "ghcr.io"
+	defaultNamespace = "kido-sh"
 	dockerHubHost    = "registry-1.docker.io"
 	dockerHubAuthKey = "https://index.docker.io/v1/"
 )
@@ -39,9 +41,11 @@ func parseRemote(s string) (remote, error) {
 	if err != nil {
 		return remote{}, err
 	}
-	r := remote{ref: ref, host: dockerHubHost, repo: ref.Name}
-	if first, rest, ok := strings.Cut(ref.Name, "/"); ok && (strings.ContainsAny(first, ".:") || first == "localhost") {
+	r := remote{ref: ref, host: defaultHost, repo: ref.Name}
+	if first, rest, ok := strings.Cut(ref.Name, "/"); ok && isRegistryHost(first) {
 		r.host, r.repo = first, rest
+	} else if !ok {
+		r.repo = defaultNamespace + "/" + ref.Name
 	}
 	if r.host == "docker.io" || r.host == "index.docker.io" {
 		r.host = dockerHubHost
@@ -55,6 +59,12 @@ func parseRemote(s string) (remote, error) {
 	}
 	r.insecure = isLoopback(r.host)
 	return r, nil
+}
+
+func (r remote) String() string { return r.host + "/" + r.repo + ":" + r.ref.Tag }
+
+func isRegistryHost(s string) bool {
+	return strings.ContainsAny(s, ".:") || s == "localhost"
 }
 
 func isLoopback(hostport string) bool {

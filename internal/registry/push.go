@@ -138,7 +138,7 @@ func Push(ctx context.Context, o PushOptions) (string, string, error) {
 
 	c, err := newClient(ctx, r, true)
 	if err != nil {
-		return "", "", err
+		return "", "", fmt.Errorf("%s: %w", r, err)
 	}
 	for _, l := range layers {
 		if err := pushBlob(ctx, c, l, o.Progress); err != nil {

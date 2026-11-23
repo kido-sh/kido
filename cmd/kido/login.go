@@ -20,7 +20,7 @@ func init() {
 
 func regLogin(ctx context.Context, args []string) int {
 	fs := ctrFlags("login", "[OPTIONS] [SERVER]\n\n"+
-		"Checks the credentials against SERVER (default docker.io) and stores them in the credential\n"+
+		"Checks the credentials against SERVER (default ghcr.io) and stores them in the credential\n"+
 		"helper that ~/.docker/config.json names, or in that file.")
 	username := fs.String("u", "", "username")
 	fs.StringVar(username, "username", "", "username")

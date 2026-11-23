@@ -55,11 +55,11 @@ func Pull(ctx context.Context, o PullOptions) (string, string, error) {
 
 	c, err := newClient(ctx, r, false)
 	if err != nil {
-		return "", "", err
+		return "", "", fmt.Errorf("%s: %w", r, err)
 	}
 	m, digest, err := c.resolve(ctx, r.ref.Tag)
 	if err != nil {
-		return "", "", err
+		return "", "", fmt.Errorf("%s: %w", r, err)
 	}
 	if err := checkManifest(m); err != nil {
 		return "", "", fmt.Errorf("%s: %w", r.ref, err)
