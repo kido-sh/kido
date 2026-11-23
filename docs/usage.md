@@ -96,9 +96,9 @@ uid, with or without a passwd entry. `kido push` and `kido pull` share credentia
   `make sign` builds and signs it as `bin/kido-vmm`, and `make install`, Homebrew and `install.sh`
   put it in `libexec/kido/`. kido looks for it in `$KIDO_VMM`, next to the `kido` binary, and in
   `../libexec/kido`. Streams are much faster than under QEMU (exec runs at about 500-800 MB/s).
-  This backend has no UDP port publishing yet, and `logs --console` stays empty, because the guest
-  has no virtio-console driver yet. macOS's Local Network privacy covers vmnet's network. Terminal
-  and SSH sessions are allowed, and any other app that runs kido asks once.
+  `kido-vmm` also relays published TCP and UDP ports. On this backend `logs --console` stays empty,
+  because the guest has no virtio-console driver yet. macOS's Local Network privacy covers vmnet's
+  network. Terminal and SSH sessions are allowed, and any other app that runs kido asks once.
 - **QEMU** (`KIDO_BACKEND=qemu`): `qemu-system-aarch64 -machine virt -accel hvf` boots the guest's
   kernel directly. It runs on a qcow2 overlay of the image's disk, behind QEMU's user-mode NAT.
 
@@ -136,7 +136,8 @@ uid, with or without a passwd entry. `kido push` and `kido pull` share credentia
   - The host reaches every container's address, as Docker does on Linux.
 - **Published ports** (`-p`) bind to 127.0.0.1 unless you name another address, on both backends
   and with `--network none`. kido does not use vmnet's own port forwarding, because it would also
-  listen on the Mac's LAN addresses.
+  listen on the Mac's LAN addresses. For UDP on the Virtualization.framework backend, each client
+  keeps its own relay until neither side has sent anything for 90 seconds, as with Docker's proxy.
 
 ## Copy mounts: `-v` and `--mount type=bind`
 

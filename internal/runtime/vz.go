@@ -101,28 +101,13 @@ func vzBootFiles(imgDir string) (kernel, initrd string) {
 // APFS clone of the image's raw disk.
 // On failure it removes the container directory that prepare has just allocated.
 func (r *Runtime) vzPrepareDisk(info *Info, backing string) (*Info, error) {
-	err := vzNetworkSupported(info)
-	if err == nil {
-		err = cloneFile(backing, r.file(info.ID, "disk.img"))
-	}
-	if err != nil {
+	if err := cloneFile(backing, r.file(info.ID, "disk.img")); err != nil {
 		if idRE.MatchString(info.ID) {
 			os.RemoveAll(r.dir(info.ID))
 		}
 		return nil, err
 	}
 	return info, nil
-}
-
-// vzNetworkSupported refuses udp ports: kido-vmm proxies tcp only, and vmnet's own forwarding
-// would also listen on the Mac's LAN addresses.
-func vzNetworkSupported(info *Info) error {
-	for _, p := range info.Ports {
-		if p.Protocol != "tcp" {
-			return fmt.Errorf("port %d/%s: the vz backend publishes tcp ports only", p.GuestPort, p.Protocol)
-		}
-	}
-	return nil
 }
 
 type vzNetwork struct {
@@ -278,9 +263,6 @@ func (r *Runtime) vzBoot(ctx context.Context, info *Info) error {
 	if !uuidRE.MatchString(info.RootUUID) {
 		return fmt.Errorf("image %s: invalid root UUID %q", info.Image, info.RootUUID)
 	}
-	if err := vzNetworkSupported(info); err != nil {
-		return err
-	}
 	var nw *vzNetwork
 	if info.Network == "" {
 		nw, err = r.vzAddress(info.ID)
@@ -348,7 +330,7 @@ func (r *Runtime) vzBoot(ctx context.Context, info *Info) error {
 		"--forward", fmt.Sprintf("tcp:127.0.0.1:%d:%s:%d", agentPort, nw.Guest, proto.DefaultPort),
 	}
 	for _, p := range info.Ports {
-		args = append(args, "--forward", fmt.Sprintf("tcp:%s:%d:%s:%d", p.HostIP, p.HostPort, nw.Guest, p.GuestPort))
+		args = append(args, "--forward", fmt.Sprintf("%s:%s:%d:%s:%d", p.Protocol, p.HostIP, p.HostPort, nw.Guest, p.GuestPort))
 	}
 	args = append(args, margs...)
 	vmm := VMMPath()

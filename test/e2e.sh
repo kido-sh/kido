@@ -135,6 +135,15 @@ echo hi > "$KIDO_HOME/vol/in"
 checko "run --rm -v :ro reads"  0 "hi" "$kido" run --rm -v "$KIDO_HOME/vol:/data:ro" darwin cat /data/in
 check  "run --rm -v writes"     0 "$kido" run --rm -v "$KIDO_HOME/vol:/data" darwin /bin/sh -c 'echo new > /data/new'
 checko "-v copied the write back" 0 "new" cat "$KIDO_HOME/vol/new"
+probe=$KIDO_HOME/netprobe
+(cd "$root" && CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -o "$probe" ./test/netprobe) || exit 1
+udp_port=$(python3 -c 'import socket; s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
+udp_echo() { for _ in 1 2 3 4 5; do "$probe" udp "127.0.0.1:$udp_port" ping 2s && return 0; done; return 1; }
+check  "run -d -p udp"          0 "$kido" run -d --name e2e-u -p "127.0.0.1:$udp_port:9999/udp" darwin sleep 600
+check  "cp netprobe in"         0 "$kido" cp "$probe" e2e-u:/var/root/netprobe
+check  "exec -d udp echo"       0 "$kido" exec -d e2e-u /var/root/netprobe udpserve 9999
+checko "-p udp answers"         0 ": ping" udp_echo
+check  "rm -f udp container"    0 "$kido" rm -f e2e-u
 checko "run without IMAGE"    125 "\"kido run\" requires at least 1 argument." "$kido" run
 check  "no full help for it"    0 sh -c '! "$1" run 2>&1 | grep -q Options:' sh "$kido"
 checko "build without PATH"   125 "requires exactly 1 argument" "$kido" build -t x

@@ -2,7 +2,8 @@
 // It exits when the guest powers off. SIGTERM or SIGINT stops the VM at once; SIGUSR1 pauses it and
 // SIGUSR2 resumes it (--state-file then reads "paused" or "running").
 // --forward tcp:HOSTIP:HOSTPORT:GUESTIP:GUESTPORT stands in for QEMU's hostfwd: VZ's NAT has no
-// port forwarding, so the helper proxies each TCP connection to the guest's NAT address.
+// port forwarding, so the helper proxies each TCP connection, or each UDP client with udp:, to the
+// guest's address.
 // --network FILE attaches the VM to a vmnet network (macOS 26+) that `kido-vmm hold-network` owns.
 #import <Foundation/Foundation.h>
 #import <Virtualization/Virtualization.h>
@@ -74,6 +75,7 @@ enum { maxConns = 256 };
 typedef struct {
   struct sockaddr_in host, guest;
   int fd;
+  bool udp;
   atomic_int conns;
 } forward_t;
 
@@ -213,6 +215,100 @@ static void *serve(void *arg) {
   return NULL;
 }
 
+// MARK: UDP forwarding
+
+// Each client address gets its own socket connected to the guest, so replies go back to the right
+// client. A session idle for udpIdle seconds is closed, and a full table drops its oldest session.
+enum { maxSessions = 256, udpIdle = 90, udpBuf = 65536 };
+
+typedef struct {
+  struct sockaddr_in client;
+  int fd;
+  time_t last;
+} session_t;
+
+static int dialGuestUDP(const struct sockaddr_in *sa) {
+  unsigned idx = bridgeIndex(sa->sin_addr);
+  if (!idx) {
+    errno = ENETUNREACH;
+    return -1;
+  }
+  int s = socket(AF_INET, SOCK_DGRAM, 0);
+  if (s < 0) return -1;
+  if (setsockopt(s, IPPROTO_IP, IP_BOUND_IF, &idx, sizeof(idx)) != 0 ||
+      connect(s, (const struct sockaddr *)sa, sizeof(*sa)) != 0) {
+    int saved = errno;
+    close(s);
+    errno = saved;
+    return -1;
+  }
+  fcntl(s, F_SETFD, FD_CLOEXEC);
+  fcntl(s, F_SETFL, fcntl(s, F_GETFL) | O_NONBLOCK);
+  return s;
+}
+
+static void *udpLoop(void *arg) {
+  forward_t *f = arg;
+  session_t sessions[maxSessions];
+  struct pollfd fds[maxSessions + 1];
+  char *buf = malloc(udpBuf);
+  int n = 0;
+  for (;;) {
+    fds[0] = (struct pollfd){.fd = f->fd, .events = POLLIN};
+    for (int i = 0; i < n; i++) fds[i + 1] = (struct pollfd){.fd = sessions[i].fd, .events = POLLIN};
+    int ready = poll(fds, (nfds_t)n + 1, 1000);
+    time_t now = time(NULL);
+    for (int i = 0; ready > 0 && i < n; i++) {
+      if (!fds[i + 1].revents) continue;
+      ssize_t m = recv(sessions[i].fd, buf, udpBuf, 0);
+      if (m < 0) continue;
+      sendto(f->fd, buf, (size_t)m, 0, (struct sockaddr *)&sessions[i].client, sizeof(sessions[i].client));
+      sessions[i].last = now;
+    }
+    if (ready > 0 && (fds[0].revents & POLLIN)) {
+      struct sockaddr_in from;
+      socklen_t len = sizeof(from);
+      ssize_t m = recvfrom(f->fd, buf, udpBuf, 0, (struct sockaddr *)&from, &len);
+      int i = 0;
+      while (m >= 0 && i < n &&
+             (sessions[i].client.sin_addr.s_addr != from.sin_addr.s_addr || sessions[i].client.sin_port != from.sin_port))
+        i++;
+      if (m >= 0 && i == n) {
+        if (n == maxSessions) {
+          int oldest = 0;
+          for (int j = 1; j < n; j++)
+            if (sessions[j].last < sessions[oldest].last) oldest = j;
+          close(sessions[oldest].fd);
+          sessions[oldest] = sessions[--n];
+          i = n;
+        }
+        int g = dialGuestUDP(&f->guest);
+        if (g < 0) {
+          static atomic_int failures;
+          if (errno != ENETUNREACH && atomic_fetch_add(&failures, 1) < 20)
+            logf_("udp to guest port %d: %s", ntohs(f->guest.sin_port), strerror(errno));
+          m = -1;
+        } else {
+          sessions[n++] = (session_t){.client = from, .fd = g};
+        }
+      }
+      if (m >= 0) {
+        send(sessions[i].fd, buf, (size_t)m, 0);
+        sessions[i].last = now;
+      }
+    }
+    for (int i = 0; i < n;) {
+      if (now - sessions[i].last > udpIdle) {
+        close(sessions[i].fd);
+        sessions[i] = sessions[--n];
+      } else {
+        i++;
+      }
+    }
+  }
+  return NULL;
+}
+
 // MARK: console
 
 // The console goes through a pipe to a thread that keeps FILE and FILE.1 at most consoleMax bytes
@@ -287,16 +383,18 @@ static int parseAddr(const char *ip, const char *port, struct sockaddr_in *sa) {
   return *end == 0 && p > 0 && p < 65536 && inet_pton(AF_INET, ip, &sa->sin_addr) == 1 ? 0 : -1;
 }
 
-// parseForward reads tcp:HOSTIP:HOSTPORT:GUESTIP:GUESTPORT.
+// parseForward reads tcp:HOSTIP:HOSTPORT:GUESTIP:GUESTPORT, or the same with udp.
 static forward_t *parseForward(const char *spec) {
   char *dup = strdup(spec), *parts[5], *save = NULL;
   int n = 0;
   for (char *tok = strtok_r(dup, ":", &save); tok && n < 5; tok = strtok_r(NULL, ":", &save)) parts[n++] = tok;
   forward_t *f = calloc(1, sizeof(*f));
-  if (n != 5 || strtok_r(NULL, ":", &save) || strcmp(parts[0], "tcp") != 0 || parseAddr(parts[1], parts[2], &f->host) != 0 ||
-      parseAddr(parts[3], parts[4], &f->guest) != 0) {
+  if (n != 5 || strtok_r(NULL, ":", &save) || (strcmp(parts[0], "tcp") != 0 && strcmp(parts[0], "udp") != 0) ||
+      parseAddr(parts[1], parts[2], &f->host) != 0 || parseAddr(parts[3], parts[4], &f->guest) != 0) {
     free(f);
     f = NULL;
+  } else {
+    f->udp = strcmp(parts[0], "udp") == 0;
   }
   free(dup);
   return f;
@@ -304,12 +402,20 @@ static forward_t *parseForward(const char *spec) {
 
 static int listenOn(forward_t *f) {
   int one = 1;
+  pthread_t t;
+  if (f->udp) {
+    f->fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (f->fd < 0) return -1;
+    fcntl(f->fd, F_SETFD, FD_CLOEXEC);
+    fcntl(f->fd, F_SETFL, fcntl(f->fd, F_GETFL) | O_NONBLOCK);
+    if (bind(f->fd, (struct sockaddr *)&f->host, sizeof(f->host)) != 0) return -1;
+    return pthread_create(&t, NULL, udpLoop, f);
+  }
   f->fd = socket(AF_INET, SOCK_STREAM, 0);
   if (f->fd < 0) return -1;
   setsockopt(f->fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
   fcntl(f->fd, F_SETFD, FD_CLOEXEC);
   if (bind(f->fd, (struct sockaddr *)&f->host, sizeof(f->host)) != 0 || listen(f->fd, 128) != 0) return -1;
-  pthread_t t;
   return pthread_create(&t, NULL, acceptLoop, f);
 }
 
@@ -494,7 +600,7 @@ static VZNetworkDeviceAttachment *vmnetAttachment(NSString *path) {
 static void usage(void) {
   fprintf(stderr, "usage: kido-vmm --kernel IMAGE --initrd CPIO --disk RAW --cmdline-file FILE [--cpus N] [--memory MB]\n"
                   "               [--mac MAC] [--console FILE [--console-max BYTES]] [--state-file FILE] [--disk-sync full|fsync|none]\n"
-                  "               [--network FILE] [--forward tcp:HOSTIP:HOSTPORT:GUESTIP:GUESTPORT ...]\n"
+                  "               [--network FILE] [--forward tcp|udp:HOSTIP:HOSTPORT:GUESTIP:GUESTPORT ...]\n"
                   "               [--extra-disk RAW ...] [--extra-disk-ro RAW ...]\n"
                   "       kido-vmm hold-network --subnet A.B.C.D/N [--host-only] --network FILE --users FILE\n");
   exit(2);
