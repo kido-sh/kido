@@ -1,8 +1,8 @@
 # kido
 
 kido runs macOS command-line tools in small Darwin VMs on Apple Silicon Macs. You use it like
-Docker: `kido run`, `kido build`, `kido push`. Each container boots a real Darwin kernel (XNU) in
-about half a second.
+Docker, with `kido run`, `kido build` and `kido push`. Each container boots a real Darwin kernel
+(XNU) in about half a second.
 
 ```console
 $ kido run --rm darwin sw_vers
@@ -29,8 +29,8 @@ kido setup --image ghcr.io/kido-sh/darwin
 kido run --rm darwin sw_vers
 ```
 
-`kido setup` downloads QEMU and the Darwin image, about 130 MB in all. If QEMU needs libraries
-from Homebrew, `kido setup` tells you which ones to install.
+`kido setup` downloads QEMU and the Darwin image. Together they are about 130 MB. If QEMU needs
+libraries from Homebrew, `kido setup` tells you which ones to install.
 
 ## Examples
 
@@ -53,8 +53,8 @@ hello
 $ kido rm -f box
 ```
 
-Put your own macOS tool in an image. This Dockerfile adds yq, from its official macOS arm64
-release:
+Put your own macOS tool in an image. This Dockerfile adds yq. The binary is yq's official macOS
+arm64 release.
 
 ```dockerfile
 FROM darwin
@@ -78,16 +78,16 @@ $ kido push yq ghcr.io/YOUR-NAME/yq
 $ kido pull ghcr.io/YOUR-NAME/yq
 ```
 
-[docs/usage.md](docs/usage.md) covers the rest: every command, networks, ports and `-v`.
+[docs/usage.md](docs/usage.md) covers every command, networks, ports and `-v`.
 
 ## How it works
 
 Each container is its own small VM, with its own kernel, memory and disk. kido starts it with QEMU
-and Hypervisor.framework, or with Apple's Virtualization.framework (`KIDO_BACKEND=vz`,
-experimental). The system inside is [KidoDarwin](https://github.com/kido-sh/darwin): Apple's
-open-source XNU kernel, launchd and a small set of Unix tools. A small agent in the VM runs your
-commands. kido talks to it over an encrypted and authenticated channel; see
-[docs/security.md](docs/security.md).
+and Hypervisor.framework. Set `KIDO_BACKEND=vz` to use Apple's Virtualization.framework instead.
+That backend is still experimental. The system inside is
+[KidoDarwin](https://github.com/kido-sh/darwin). It has Apple's open-source XNU kernel, launchd and
+a small set of Unix tools. A small agent in the VM runs your commands. kido talks to it over an
+encrypted and authenticated channel. [docs/security.md](docs/security.md) explains how.
 
 ## What runs
 
@@ -95,8 +95,8 @@ commands. kido talks to it over an encrypted and authenticated channel; see
   use. Universal binaries run their arm64 part.
 - Some tools still stop at launch with `Symbol not found` or `image not loaded`. Please
   [open an issue](https://github.com/kido-sh/darwin/issues) with the tool's name.
-- Apple's own binaries do not run: they are built for arm64e. Tools built only for x86_64 do not
-  run either (there is no Rosetta), and neither do GUI apps.
+- Apple's own binaries do not run, because they are built for arm64e.
+- Tools built only for x86_64 do not run, because there is no Rosetta. GUI apps do not run either.
 - `-v` copies files in and out. It is not a live mount.
 - There is no USB passthrough and no GPU.
 
@@ -109,7 +109,7 @@ Run `kido doctor`. Every failed check prints its fix.
 
 ## License
 
-kido is licensed under the Apache License 2.0; see [LICENSE](LICENSE). The Darwin image and QEMU
+kido is licensed under the Apache License 2.0. See [LICENSE](LICENSE). The Darwin image and QEMU
 are separate downloads with their own licenses. The image's licenses are listed in
 [KidoDarwin's LICENSING.md](https://github.com/kido-sh/darwin/blob/main/LICENSING.md). QEMU is
 licensed under the GNU General Public License, version 2.
