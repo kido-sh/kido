@@ -21,6 +21,11 @@ Start with `kido doctor`. Every failed check prints its fix.
   [kido-sh/darwin](https://github.com/kido-sh/darwin/issues) with the tool and the message.
 - **A container does not start**: `kido logs --console NAME` shows the guest's serial console
   (QEMU only).
+- **`macOS blocked kido from reaching the VM`**: the Virtualization.framework backend reaches each
+  VM over vmnet's network, and macOS's Local Network privacy covers that network. Terminal and SSH
+  sessions are allowed. Another app that runs kido asks once. If you said no, turn that app on in
+  System Settings > Privacy & Security > Local Network. A launchd agent cannot ask, so run kido
+  from a terminal instead.
 - **KIDO_HOME too long**: `kido commit` of a running QEMU container pauses it through a unix socket
   under `$KIDO_HOME`. This limits `$KIDO_HOME` to 66 characters. Other commands work with a longer
   one.

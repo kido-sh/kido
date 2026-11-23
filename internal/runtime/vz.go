@@ -399,6 +399,10 @@ func (r *Runtime) vzBoot(ctx context.Context, info *Info) error {
 		r.save(info)
 		return err
 	}
+	blocked := localNetworkBlocked(filepath.Join(dir, "vmm.log"), nw.Guest)
+	if blocked {
+		err = fmt.Errorf("macOS blocked kido from reaching the VM at %s. Allow Local Network access for the app you run kido from, in System Settings > Privacy & Security > Local Network. Terminal and SSH sessions have it already", nw.Guest)
+	}
 	cmd.Process.Kill()
 	select {
 	case <-exited:
@@ -412,6 +416,9 @@ func (r *Runtime) vzBoot(ctx context.Context, info *Info) error {
 	if ctx.Err() != nil {
 		return fmt.Errorf("boot interrupted: %w", ctx.Err())
 	}
+	if blocked {
+		return err
+	}
 	msg := fmt.Sprintf("%v (guest %s; if vmnet's NAT network is not %s, set KIDO_VZ_SUBNET)", err, nw.Guest, vzDefaultSubnet)
 	if info.Network != "" {
 		msg = fmt.Sprintf("%v (guest %s on network %s)", err, nw.Guest, info.Network)
@@ -420,6 +427,20 @@ func (r *Runtime) vzBoot(ctx context.Context, info *Info) error {
 		msg = "kido-vmm (" + vmm + ") said:\n" + t + "\n" + msg
 	}
 	return errors.New(msg)
+}
+
+// localNetworkBlocked tells macOS's Local Network privacy apart from a wrong subnet: the host has an
+// address next to the guest, yet every dial failed at once.
+func localNetworkBlocked(vmmLog string, guest netip.Addr) bool {
+	if !strings.Contains(tail(vmmLog, 10), "No route to host after 0 ms") {
+		return false
+	}
+	for _, p := range hostSubnets() {
+		if p.Contains(guest) {
+			return true
+		}
+	}
+	return false
 }
 
 // vzSetPaused pauses or resumes the VM through kido-vmm's SIGUSR1/SIGUSR2 and waits for the state.

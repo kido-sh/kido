@@ -415,7 +415,7 @@ func waitReady(ctx context.Context, port int, cred *agentCred, exited <-chan str
 	for time.Now().Before(deadline) {
 		select {
 		case <-exited:
-			return errors.New("qemu exited during boot")
+			return errors.New("the VM exited during boot")
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
@@ -427,7 +427,7 @@ func waitReady(ctx context.Context, port int, cred *agentCred, exited <-chan str
 		}
 		select {
 		case <-exited:
-			return errors.New("qemu exited during boot")
+			return errors.New("the VM exited during boot")
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-time.After(20 * time.Millisecond):
