@@ -59,20 +59,29 @@ func VMMPath() string {
 	if p := os.Getenv("KIDO_VMM"); p != "" {
 		return p
 	}
-	var candidates []string
-	if exe, err := os.Executable(); err == nil {
-		dir := filepath.Dir(exe)
-		candidates = append(candidates, filepath.Join(dir, vmmComm), filepath.Join(dir, "..", "libexec", "kido", vmmComm))
-	}
-	if DevVMM != "" {
-		candidates = append(candidates, DevVMM)
-	}
-	for _, p := range candidates {
+	exe, _ := os.Executable()
+	for _, p := range vmmCandidates(exe) {
 		if st, err := os.Stat(p); err == nil && st.Mode().IsRegular() {
 			return p
 		}
 	}
 	return ""
+}
+
+// vmmCandidates looks next to the real kido, not next to a symlink to it such as Homebrew's.
+func vmmCandidates(exe string) []string {
+	var out []string
+	if exe != "" {
+		if real, err := filepath.EvalSymlinks(exe); err == nil {
+			exe = real
+		}
+		dir := filepath.Dir(exe)
+		out = append(out, filepath.Join(dir, vmmComm), filepath.Join(dir, "..", "libexec", "kido", vmmComm))
+	}
+	if DevVMM != "" {
+		out = append(out, DevVMM)
+	}
+	return out
 }
 
 // vzBootFiles are the image's kernel and initrd, or $KIDO_VZ_KERNEL and $KIDO_VZ_INITRD when set:

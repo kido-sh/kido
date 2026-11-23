@@ -3,9 +3,36 @@ package runtime
 import (
 	"net/netip"
 	"os"
+	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 )
+
+func TestVMMCandidatesFollowSymlinks(t *testing.T) {
+	dir := t.TempDir()
+	kido := filepath.Join(dir, "prefix", "bin", "kido")
+	link := filepath.Join(dir, "bin", "kido")
+	for _, d := range []string{filepath.Dir(kido), filepath.Dir(link)} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(kido, nil, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../prefix/bin/kido", link); err != nil {
+		t.Fatal(err)
+	}
+	real, err := filepath.EvalSymlinks(kido)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(filepath.Dir(real), "..", "libexec", "kido", vmmComm)
+	if got := vmmCandidates(link); !slices.Contains(got, want) {
+		t.Fatalf("got %q, want %q among them", got, want)
+	}
+}
 
 func TestVZAddress(t *testing.T) {
 	t.Setenv("KIDO_VZ_SUBNET", "")
