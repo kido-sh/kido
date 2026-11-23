@@ -1,0 +1,29 @@
+# Template for a future cask in the kido-sh/tap tap that installs the signed, notarized .pkg
+# (packaging/notarize.md). Nothing publishes it yet. Replace @VERSION@ and @SHA256@ (`shasum -a 256`
+# of the pkg).
+cask "kido" do
+  version "@VERSION@"
+  sha256 "@SHA256@"
+
+  url "https://github.com/kido-sh/kido/releases/download/v#{version}/kido-#{version}.pkg"
+  name "kido"
+  desc "Docker-like CLI that runs macOS arm64 command-line tools in Darwin micro-VMs"
+  homepage "https://kido.sh"
+
+  depends_on arch: :arm64
+  depends_on macos: ">= :sequoia"
+
+  pkg "kido-#{version}.pkg"
+
+  uninstall pkgutil: "sh.kido.pkg"
+
+  # ~/.kido holds QEMU (from `kido setup`), images and containers.
+  zap trash: "~/.kido"
+
+  caveats <<~EOS
+    Finish the setup as your own user (no sudo): `kido setup` downloads a pinned,
+    checksummed QEMU into ~/.kido/qemu; `kido setup --image REGISTRY/darwin:latest`
+    also pulls a base image, or import one with `kido image import DIR darwin`.
+    Run `kido doctor` to check everything.
+  EOS
+end
