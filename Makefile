@@ -36,7 +36,6 @@ BINDIR     = $(DESTDIR)$(PREFIX)/bin
 LIBEXECDIR = $(DESTDIR)$(PREFIX)/libexec/kido
 DOCDIR     = $(DESTDIR)$(PREFIX)/share/doc/kido
 
-RELEASE_KEY       ?= $(HOME)/.ssh/kido-release
 RELEASE_PUB       := internal/upgrade/release.pub
 RELEASE_NAMESPACE := release@kido.sh
 
@@ -104,6 +103,7 @@ dist: sign
 	@cat $(DISTDIR)/SHA256SUMS
 
 sign-dist:
+	@test -n "$(RELEASE_KEY)" || { echo "error: set RELEASE_KEY to the release signing key" >&2; exit 1; }
 	@test -f $(DISTDIR)/SHA256SUMS || { echo "error: run make dist first" >&2; exit 1; }
 	rm -f $(DISTDIR)/SHA256SUMS.sig
 	ssh-keygen -Y sign -f $(RELEASE_KEY) -n $(RELEASE_NAMESPACE) $(DISTDIR)/SHA256SUMS
@@ -139,7 +139,7 @@ help:
 	@echo "make              build $(OUT)/kido, $(OUT)/kido-agent and $(OUT)/kido-vmm (VERSION=$(VERSION))"
 	@echo "make sign         ad-hoc sign $(OUT)/*; DEVELOPER_ID='Developer ID Application: ...' for a release"
 	@echo "make dist         $(DIST_TAR), $(DISTDIR)/install.sh and $(DISTDIR)/SHA256SUMS"
-	@echo "make sign-dist    sign SHA256SUMS with RELEASE_KEY=$(RELEASE_KEY) (ssh-keygen -Y sign)"
+	@echo "make sign-dist RELEASE_KEY=FILE   sign SHA256SUMS with ssh-keygen -Y sign"
 	@echo "make install      install into PREFIX=$(PREFIX) (DESTDIR is honored); then run: kido setup"
 	@echo "make uninstall    remove what install put there"
 	@echo "make test | vet   go test ./... | go vet ./..."
