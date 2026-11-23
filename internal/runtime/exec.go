@@ -17,7 +17,7 @@ import (
 	"github.com/kido-sh/kido/internal/proto"
 )
 
-// ExecError is a failure to run the process at all; Status is the Docker-style exit status
+// ExecError is a failure to run the process at all; Status is the exit status
 // (125 kido error, 126 cannot run, 127 not found).
 type ExecError struct {
 	Status int

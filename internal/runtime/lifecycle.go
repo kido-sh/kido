@@ -21,7 +21,7 @@ import (
 	"github.com/kido-sh/kido/internal/imageref"
 )
 
-// CreateStopped makes a container (its disk and state) without booting it, like docker create.
+// CreateStopped makes a container, its disk and state, without booting it.
 func (r *Runtime) CreateStopped(ctx context.Context, opts engine.CreateOptions) (*engine.Container, error) {
 	info, err := r.prepare(ctx, opts)
 	if err != nil {

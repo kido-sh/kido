@@ -17,29 +17,29 @@ import (
 	"time"
 )
 
-// credential is what Docker's config or credential helper holds for one registry.
+// credential is what config.json or a credential helper holds for one registry.
 type credential struct {
 	Username      string
 	Password      string
 	IdentityToken string
 }
 
-type dockerAuth struct {
+type authEntry struct {
 	Auth          string `json:"auth,omitempty"`
 	Username      string `json:"username,omitempty"`
 	Password      string `json:"password,omitempty"`
 	IdentityToken string `json:"identitytoken,omitempty"`
 }
 
-type dockerConfig struct {
-	Auths       map[string]dockerAuth `json:"auths"`
-	CredsStore  string                `json:"credsStore"`
-	CredHelpers map[string]string     `json:"credHelpers"`
+type credConfig struct {
+	Auths       map[string]authEntry `json:"auths"`
+	CredsStore  string               `json:"credsStore"`
+	CredHelpers map[string]string    `json:"credHelpers"`
 }
 
 var helperNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
 
-func dockerConfigPath() (string, error) {
+func credConfigPath() (string, error) {
 	if d := os.Getenv("DOCKER_CONFIG"); d != "" {
 		return filepath.Join(d, "config.json"), nil
 	}
@@ -50,19 +50,19 @@ func dockerConfigPath() (string, error) {
 	return filepath.Join(home, ".docker", "config.json"), nil
 }
 
-func loadDockerConfig() (*dockerConfig, error) {
-	path, err := dockerConfigPath()
+func loadCredConfig() (*credConfig, error) {
+	path, err := credConfigPath()
 	if err != nil {
 		return nil, err
 	}
 	b, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		return &dockerConfig{}, nil
+		return &credConfig{}, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	var c dockerConfig
+	var c credConfig
 	if err := json.Unmarshal(b, &c); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
@@ -96,18 +96,17 @@ func matchKey[V any](m map[string]V, key string) (V, bool) {
 	return m[keys[0]], true
 }
 
-func (c *dockerConfig) helperFor(key string) string {
+func (c *credConfig) helperFor(key string) string {
 	if h, ok := matchKey(c.CredHelpers, key); ok {
 		return h
 	}
 	return c.CredsStore
 }
 
-// lookupCredential finds the credential `docker login` stored for key, the way the Docker CLI
-// does: a per-registry helper, then the default store, then the config file itself. No
-// credential means anonymous access.
+// lookupCredential finds the credential stored for key: a per-registry helper, then the default
+// store, then the config file itself. No credential means anonymous access.
 func lookupCredential(ctx context.Context, key string) (credential, error) {
-	cfg, err := loadDockerConfig()
+	cfg, err := loadCredConfig()
 	if err != nil {
 		return credential{}, err
 	}
@@ -128,7 +127,7 @@ func lookupCredential(ctx context.Context, key string) (credential, error) {
 	if a.Auth != "" {
 		raw, err := base64.StdEncoding.DecodeString(a.Auth)
 		if err != nil {
-			return credential{}, fmt.Errorf("docker config: unreadable auth entry for %s", printable(key))
+			return credential{}, fmt.Errorf("config.json: unreadable auth entry for %s", printable(key))
 		}
 		c.Username, c.Password, _ = strings.Cut(string(raw), ":")
 	}
@@ -137,7 +136,7 @@ func lookupCredential(ctx context.Context, key string) (credential, error) {
 
 func helperCommand(ctx context.Context, helper, verb string) (*exec.Cmd, error) {
 	if !helperNameRE.MatchString(helper) {
-		return nil, fmt.Errorf("docker config: invalid credential helper name %q", printable(helper))
+		return nil, fmt.Errorf("config.json: invalid credential helper name %q", printable(helper))
 	}
 	bin, err := exec.LookPath("docker-credential-" + helper)
 	if err != nil {
@@ -177,11 +176,11 @@ func helperGet(ctx context.Context, helper, key string) (credential, bool, error
 	return credential{Username: out.Username, Password: out.Secret}, true, nil
 }
 
-// storeCredential saves a credential the way `docker login` does: in the configured credential
+// storeCredential saves a credential in the configured credential
 // helper when there is one, otherwise base64-encoded in config.json (0600), keeping every other
 // field of the file.
 func storeCredential(ctx context.Context, key string, c credential) (string, error) {
-	cfg, err := loadDockerConfig()
+	cfg, err := loadCredConfig()
 	if err != nil {
 		return "", err
 	}
@@ -199,7 +198,7 @@ func storeCredential(ctx context.Context, key string, c credential) (string, err
 		return "credential helper " + helper, nil
 	}
 
-	path, err := dockerConfigPath()
+	path, err := credConfigPath()
 	if err != nil {
 		return "", err
 	}
@@ -225,7 +224,7 @@ func storeCredential(ctx context.Context, key string, c credential) (string, err
 			delete(auths, k)
 		}
 	}
-	entry, _ := json.Marshal(dockerAuth{Auth: base64.StdEncoding.EncodeToString([]byte(c.Username + ":" + c.Password))})
+	entry, _ := json.Marshal(authEntry{Auth: base64.StdEncoding.EncodeToString([]byte(c.Username + ":" + c.Password))})
 	auths[key] = entry
 	raw["auths"], _ = json.Marshal(auths)
 	out, err := json.MarshalIndent(raw, "", "\t")

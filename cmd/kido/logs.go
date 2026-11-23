@@ -114,7 +114,7 @@ func ctrLogs(ctx context.Context, args []string) int {
 	if err != nil {
 		return ctrFail(err)
 	}
-	// The main process's output is shown raw, as by docker logs; the serial console is guest text.
+	// The main process's output is shown raw. The serial console is guest text.
 	var out io.Writer = os.Stdout
 	if *console {
 		out = ctrSanitizer{os.Stdout}

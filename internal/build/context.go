@@ -143,7 +143,7 @@ func (c *Context) resolve(src string) ([]source, error) {
 }
 
 // realpath resolves every symlink in rel inside the context, so that .dockerignore applies to the
-// file a path really names, as it does in Docker, which never sends ignored files.
+// file a path really names, and an ignored file is never sent.
 func (c *Context) realpath(rel string) (string, error) {
 	var done []string
 	todo := strings.Split(rel, "/")

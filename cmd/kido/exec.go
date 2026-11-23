@@ -35,7 +35,7 @@ func ctrOpen() (*runtime.Runtime, error) {
 	return runtime.New(runtime.DefaultHome())
 }
 
-// ctrFail prints err and returns the Docker-style exit status for it.
+// ctrFail prints err and returns the exit status for it.
 func ctrFail(err error) int {
 	fmt.Fprintln(os.Stderr, "kido:", err)
 	var ee *runtime.ExecError

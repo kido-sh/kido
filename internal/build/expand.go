@@ -10,8 +10,8 @@ import (
 type lookupFunc func(name string) (string, bool)
 
 // expandWord substitutes $VAR, ${VAR}, ${VAR:-word}, ${VAR-word}, ${VAR:+word} and ${VAR+word},
-// and removes quotes and backslash escapes, like the Docker builder does for the instructions it
-// expands. Unset variables expand to the empty string.
+// and removes quotes and backslash escapes, in the instructions that expand variables. Unset
+// variables expand to the empty string.
 func expandWord(word string, lookup lookupFunc) (string, error) {
 	l := &lexer{src: []rune(word), lookup: lookup}
 	return l.until(eof)

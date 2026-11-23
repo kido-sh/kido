@@ -30,7 +30,7 @@ type remote struct {
 	ref      imageref.Ref
 	host     string // registry API host[:port]
 	repo     string // repository path on that registry
-	authKey  string // key of the registry in Docker's config
+	authKey  string // key of the registry in config.json
 	insecure bool   // plain HTTP: loopback registries only
 }
 
@@ -359,7 +359,7 @@ func (c *client) blobExists(ctx context.Context, d descriptor) (bool, error) {
 	return false, responseError(resp, "checking blob "+d.Digest)
 }
 
-// uploadBlob streams a blob in one PATCH and commits it with its digest, as the Docker CLI does.
+// uploadBlob streams a blob in one PATCH and commits it with its digest.
 func (c *client) uploadBlob(ctx context.Context, d descriptor, src io.ReaderAt, p *progress) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url("/blobs/uploads/"), nil)
 	if err != nil {
@@ -544,7 +544,7 @@ func responseError(resp *http.Response, what string) error {
 		}
 	}
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		msg += " (log in with `docker login` or `kido login`)"
+		msg += " (log in with `kido login`)"
 	}
 	return fmt.Errorf("%s: %s", what, msg)
 }

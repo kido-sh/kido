@@ -375,7 +375,7 @@ func TestImageIORefusesHostileArchives(t *testing.T) {
 		})
 	}
 
-	// The same archive with "./" names and a Docker archive's extra files still loads.
+	// The same archive with "./" names and a legacy archive's extra files still loads.
 	dotted := ioClone(entries)
 	for _, e := range dotted {
 		e.hdr.Name = "./" + e.hdr.Name

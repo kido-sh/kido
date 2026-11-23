@@ -7,8 +7,8 @@ import (
 	"strings"
 )
 
-// Login checks a username and password against a registry and stores them the way
-// `docker login` does. It returns where the credential was stored.
+// Login checks a username and password against a registry and stores them. It returns where
+// the credential was stored.
 func Login(ctx context.Context, server, username, password string) (string, error) {
 	r, err := parseServer(server)
 	if err != nil {
@@ -41,8 +41,7 @@ func Login(ctx context.Context, server, username, password string) (string, erro
 	return storeCredential(ctx, r.authKey, cred)
 }
 
-// parseServer accepts what `docker login` does: a host[:port], optionally with a scheme and
-// path; empty means Docker Hub.
+// parseServer accepts a host[:port], optionally with a scheme and a path. Empty means docker.io.
 func parseServer(s string) (remote, error) {
 	host := strings.TrimPrefix(strings.TrimPrefix(strings.ToLower(s), "https://"), "http://")
 	host, _, _ = strings.Cut(host, "/")

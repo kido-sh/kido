@@ -21,8 +21,8 @@ type account struct {
 	home     string
 }
 
-// lookupUser resolves "user[:group]", each part a name or a number, the way Docker does: a uid
-// missing from /etc/passwd runs with gid 0 and home "/".
+// lookupUser resolves "user[:group]", each part a name or a number. A uid missing from
+// /etc/passwd runs with gid 0 and home "/".
 func lookupUser(spec string) (*account, error) {
 	userPart, groupPart, hasGroup := strings.Cut(spec, ":")
 	if userPart == "" || (hasGroup && groupPart == "") {

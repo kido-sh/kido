@@ -59,7 +59,7 @@ func ctrStatus(i *runtime.Info) string {
 	return "Created"
 }
 
-// ctrState is Docker's one-word state: created, running or exited.
+// ctrState is the one-word state: created, running or exited.
 func ctrState(i *runtime.Info) string {
 	if i.State == engine.StateStopped {
 		return "exited"
@@ -113,7 +113,7 @@ type ctrPsRow struct {
 	labels map[string]string
 }
 
-// Label is the value of one label, as in Docker's {{.Label "key"}}.
+// Label is the value of one label, for templates such as {{.Label "key"}}.
 func (r ctrPsRow) Label(k string) string { return r.labels[k] }
 
 // ctrNetworkName is the container's network: a user network, none, or default.

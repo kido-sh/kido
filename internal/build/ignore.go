@@ -62,7 +62,7 @@ func parseIgnore(r io.Reader) (*ignoreMatcher, error) {
 }
 
 func compileIgnore(p string) (*regexp.Regexp, error) {
-	// Docker matches a leading "**" followed by plain text as a suffix: "**foo" matches "afoo".
+	// A leading "**" followed by plain text matches as a suffix: "**foo" matches "afoo".
 	if len(p) > 2 && strings.HasPrefix(p, "**") && p[2] != '/' && !strings.ContainsAny(p[2:], `*?[\`) {
 		return regexp.Compile("^.*" + regexp.QuoteMeta(p[2:]) + "$")
 	}

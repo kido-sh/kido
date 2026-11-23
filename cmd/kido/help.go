@@ -14,7 +14,7 @@ import (
 	"unicode/utf8"
 )
 
-// ctrFlags returns a flag set with Docker-style help: --help/-h print the usage to stdout and exit 0,
+// ctrFlags returns a flag set in which --help/-h print the usage to stdout and exit 0,
 // a bad flag prints "kido: ..." and a pointer to --help, and fs.Usage() prints the usage to stderr.
 func ctrFlags(name, usage string) *flag.FlagSet {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
@@ -70,7 +70,7 @@ func (h *ctrHelpFlag) Set(string) error {
 
 func ctrIsHelpArg(a string) bool { return a == "-h" || a == "-help" || a == "--help" }
 
-// ctrInterspersed moves flags that follow positional arguments in front of them, as Docker accepts
+// ctrInterspersed moves flags that follow positional arguments in front of them
 // (`kido save IMAGE -o FILE`), so fs.Parse sees them; "--" still ends the flags. Not for commands
 // whose arguments are a command line (run, create, exec).
 func ctrInterspersed(fs *flag.FlagSet, args []string) []string {

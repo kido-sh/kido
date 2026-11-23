@@ -67,7 +67,7 @@ func ctrPort(s string) (engine.PortMapping, error) {
 	return p, nil
 }
 
-// ctrMemory parses --memory as MB, accepting Docker's m/g suffixes.
+// ctrMemory parses --memory as MB, with an optional m or g suffix.
 func ctrMemory(s string) (int, error) {
 	if s == "" {
 		return 0, nil
@@ -216,7 +216,7 @@ func ctrRunOrCreate(ctx context.Context, cmdName string, args []string) int {
 
 // ctrSpawnMain starts `kido __attach ID` in its own session: it runs the container's main process,
 // writes its output to main.log, and stops the VM when the process exits. It reports on fd 3 once the
-// process has started, so a missing executable fails here like `docker run -d` does.
+// process has started, so a missing executable fails here, even with -d.
 func ctrSpawnMain(rt *runtime.Runtime, id string) (int, error) {
 	self, err := os.Executable()
 	if err != nil {

@@ -444,7 +444,7 @@ func (r *Runtime) LoadImages(ctx context.Context, rd io.Reader) ([]string, error
 
 // ociRead reads an archive, keeping oci-layout and index.json in memory and spooling each blob
 // under work while it verifies its digest. Other regular files, such as the manifest.json and
-// repositories of a Docker archive, are skipped; links, devices and names that escape are refused.
+// repositories of a legacy image archive, are skipped; links, devices and names that escape are refused.
 func ociRead(ctx context.Context, rd io.Reader, work string) (*ociArchive, error) {
 	dir := filepath.Join(work, "blobs")
 	if err := os.Mkdir(dir, 0o700); err != nil {

@@ -40,7 +40,7 @@ func ctrPlural(n int) string {
 	return "arguments"
 }
 
-// ctrArgsMessage is Docker's complaint about n positional arguments for usage, or "" when n fits.
+// ctrArgsMessage is the complaint about n positional arguments for usage, or "" when n fits.
 func ctrArgsMessage(usage string, n int) string {
 	lo, hi := ctrArgCounts(usage)
 	if n >= lo && (hi < 0 || n <= hi) {
@@ -59,7 +59,7 @@ func ctrArgsMessage(usage string, n int) string {
 	return fmt.Sprintf("requires at least %d and at most %d %s", lo, hi, ctrPlural(hi))
 }
 
-// ctrArgsError prints Docker's short error for a wrong number of arguments and reports whether it
+// ctrArgsError prints the short error for a wrong number of arguments and reports whether it
 // did; otherwise the caller prints the whole usage.
 func ctrArgsError(w io.Writer, name, usage string, n int) bool {
 	msg := ctrArgsMessage(usage, n)

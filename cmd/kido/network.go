@@ -135,7 +135,7 @@ func ctrNetworkLs(ctx context.Context, args []string) int {
 	return 0
 }
 
-// ctrNetworkView is what network inspect prints, in Docker's shape.
+// ctrNetworkView is what network inspect prints.
 type ctrNetworkView struct {
 	Name     string
 	ID       string `json:"Id"`

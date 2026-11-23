@@ -294,7 +294,7 @@ func ctrPortCmd(ctx context.Context, args []string) int {
 	return 0
 }
 
-// ctrConfirm asks before a destructive prune, like Docker; anything but y or yes declines.
+// ctrConfirm asks before a destructive prune. Anything but y or yes declines.
 func ctrConfirm(warning string) bool {
 	fmt.Printf("%s\nAre you sure you want to continue? [y/N] ", warning)
 	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
@@ -409,7 +409,7 @@ type ctrOptString struct {
 func (o *ctrOptString) String() string     { return o.value }
 func (o *ctrOptString) Set(v string) error { o.value, o.set = v, true; return nil }
 
-// ctrMainArgs is the main process of a new container, as Docker computes it: the image's
+// ctrMainArgs is the main process of a new container: the image's
 // ENTRYPOINT and CMD, the command line replacing CMD, and --entrypoint replacing the ENTRYPOINT
 // and dropping the image's CMD.
 func ctrMainArgs(cfg engine.ImageConfig, ep *ctrOptString, args []string) []string {

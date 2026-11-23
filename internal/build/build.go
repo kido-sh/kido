@@ -76,8 +76,8 @@ var (
 )
 
 // mkdirScript is mkdir -p "$1" for an absolute path. When it creates "$1", it sets its mode to "$3"
-// if given, and hands every directory it creates to owner "$2" if given, as Docker does for
-// COPY --chown and for WORKDIR under USER. The guest's chown takes no options (no -R, no -h), so
+// if given, and hands every directory it creates to owner "$2" if given, for COPY --chown and for
+// WORKDIR under USER. The guest's chown takes no options (no -R, no -h), so
 // each new directory is named.
 const mkdirScript = `dir=$1; owner=$2; mode=$3; d=$1
 case $dir in /*) ;; *) exit 2;; esac
@@ -718,8 +718,8 @@ func normalizePort(s string) (string, error) {
 	return fmt.Sprintf("%d/%s", l, proto), nil
 }
 
-// owner expands and validates --chown. A bare UID also sets the GID, as in Docker; a bare user
-// name changes the owner only.
+// owner expands and validates --chown. A bare UID also sets the GID, and a bare user name
+// changes the owner only.
 func (b *builder) owner(s *step) (string, error) {
 	raw, ok := s.flags["chown"]
 	if !ok {
@@ -735,7 +735,7 @@ func (b *builder) owner(s *step) (string, error) {
 	return ownerSpec(v), nil
 }
 
-// ownerSpec gives a bare UID the same GID, as Docker does.
+// ownerSpec gives a bare UID the same GID.
 func ownerSpec(v string) string {
 	if _, err := strconv.Atoi(v); err == nil {
 		return v + ":" + v

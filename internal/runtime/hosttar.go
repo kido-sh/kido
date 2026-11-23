@@ -13,7 +13,7 @@ import (
 )
 
 // TarHostPath writes src (file, directory or symlink, never followed) to w as a tar stream whose
-// top-level entry is called name. Owners are reset to root, as docker cp does.
+// top-level entry is called name. Owners are reset to root.
 func TarHostPath(w io.Writer, src, name string) error {
 	if !SafeEntryName(name) || strings.Contains(name, "/") {
 		return fmt.Errorf("invalid entry name %q", name)

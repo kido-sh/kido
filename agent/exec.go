@@ -415,7 +415,7 @@ func stdinWriter(ch <-chan []byte, w io.Writer, c io.Closer) {
 }
 
 // readFrames handles the client's frames until the connection ends. Closing stdin on a TTY only
-// stops forwarding, as with docker run -t without -i. A connection that ends while stdin is still
+// stops forwarding, as -t without -i does. A connection that ends while stdin is still
 // open (or on a TTY) hangs the session up like a closed terminal: the input may have been cut short
 // on the way, so a process without a terminal is killed rather than ever reading it as complete.
 func (s *session) readFrames(ch *proto.Channel, tty bool) {

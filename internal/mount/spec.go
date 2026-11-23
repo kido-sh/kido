@@ -28,7 +28,7 @@ var systemDirs = []string{
 	"/Library", "/Users", "/Volumes", "/var/root", "/private/var/root",
 }
 
-// ParseVolume parses Docker's -v HOST:GUEST[:OPTIONS] with OPTIONS ro or rw. HOST is an absolute
+// ParseVolume parses -v HOST:GUEST[:OPTIONS] with OPTIONS ro or rw. HOST is an absolute
 // path or a relative one starting with "." or "/"; named volumes are not supported.
 func ParseVolume(s string) (engine.Mount, error) {
 	parts := strings.Split(s, ":")
@@ -56,7 +56,7 @@ func ParseVolume(s string) (engine.Mount, error) {
 	return m, nil
 }
 
-// ParseMount parses Docker's --mount type=bind,source=HOST,target=GUEST[,readonly].
+// ParseMount parses --mount type=bind,source=HOST,target=GUEST[,readonly].
 func ParseMount(s string) (engine.Mount, error) {
 	r := csv.NewReader(strings.NewReader(s))
 	fields, err := r.Read()

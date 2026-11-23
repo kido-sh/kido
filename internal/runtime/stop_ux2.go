@@ -10,7 +10,7 @@ import (
 	"github.com/kido-sh/kido/internal/engine"
 )
 
-// stopMain ends the main process of a running container the way docker stop does: SIGTERM, up to
+// stopMain ends the main process of a running container: SIGTERM, up to
 // timeout for it to exit, then SIGKILL. Stop calls it with the container locked and Stopping saved,
 // so the process's owner records its exit status and leaves the VM to Stop. Nothing is sent when
 // the caller is the owner itself: its main process has already exited.

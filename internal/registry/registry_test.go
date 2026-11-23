@@ -418,7 +418,7 @@ func TestPullRejectsTamperedBlob(t *testing.T) {
 }
 
 // TestPullWithBearerToken pulls through a registry that wants a token from a separate realm,
-// with the credential `docker login` would have stored in config.json.
+// with a credential stored in config.json.
 func TestPullWithBearerToken(t *testing.T) {
 	cfgDir := t.TempDir()
 	t.Setenv("DOCKER_CONFIG", cfgDir)

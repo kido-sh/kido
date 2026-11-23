@@ -22,7 +22,7 @@ find . -xdev \( -type c -o -type b \) -print | while IFS= read -r f; do echo "ki
 find . -xdev ! -type s ! -type c ! -type b -print0 | tar -c -f - --no-recursion --null -T -`
 
 // Export writes the container's root filesystem to w as a tar stream whose entry names are relative
-// to /, the way docker export writes them. Each socket or device node left out is passed to skipped
+// to /. Each socket or device node left out is passed to skipped
 // as "socket PATH" or "device PATH", unsanitized; calls never overlap.
 func (r *Runtime) Export(ctx context.Context, ref string, w io.Writer, skipped func(string)) error {
 	var mu sync.Mutex

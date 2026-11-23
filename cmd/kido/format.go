@@ -31,7 +31,7 @@ var ctrTemplateFuncs = template.FuncMap{
 	},
 }
 
-// ctrFormatter prints rows with a Docker-style --format: a Go template, "table TEMPLATE" (a header
+// ctrFormatter prints rows with --format: a Go template, "table TEMPLATE" (a header
 // and aligned columns), or "json" (one JSON object per line).
 type ctrFormatter struct {
 	w      io.Writer

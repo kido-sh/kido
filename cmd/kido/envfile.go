@@ -11,7 +11,7 @@ import (
 	"unicode/utf8"
 )
 
-// ctrReadEnvFiles reads --env-file files in order, in Docker's format (see ctrParseEnvFile).
+// ctrReadEnvFiles reads --env-file files in order, in the format ctrParseEnvFile describes.
 func ctrReadEnvFiles(paths []string) ([]string, error) {
 	var out []string
 	for _, p := range paths {
@@ -29,7 +29,7 @@ func ctrReadEnvFiles(paths []string) ([]string, error) {
 	return out, nil
 }
 
-// ctrParseEnvFile parses Docker's env file format: one KEY=VALUE per line, the value taken as is
+// ctrParseEnvFile parses an env file: one KEY=VALUE per line, the value taken as is
 // (no quotes are removed); a bare KEY takes the host's value and is dropped when the host has none;
 // blank lines and lines whose first non-blank character is # are skipped.
 func ctrParseEnvFile(r io.Reader, lookup func(string) (string, bool)) ([]string, error) {
