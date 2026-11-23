@@ -36,11 +36,15 @@ BINDIR     = $(DESTDIR)$(PREFIX)/bin
 LIBEXECDIR = $(DESTDIR)$(PREFIX)/libexec/kido
 DOCDIR     = $(DESTDIR)$(PREFIX)/share/doc/kido
 
+RELEASE_KEY       ?= $(HOME)/.ssh/kido-release
+RELEASE_PUB       := internal/upgrade/release.pub
+RELEASE_NAMESPACE := release@kido.sh
+
 DIST_NAME    := kido-$(VERSION)-darwin-arm64
 DIST_ROOT    := $(DISTDIR)/$(DIST_NAME)
 DIST_TAR     := $(DISTDIR)/$(DIST_NAME).tar.gz
 
-.PHONY: all build sign dist install uninstall test vet clean help FORCE
+.PHONY: all build sign dist sign-dist install uninstall test vet clean help FORCE
 
 all: build
 
@@ -81,7 +85,7 @@ sign: build
 	  codesign --verify --strict "$$bin"; \
 	done
 
-# The release assets: the versioned tarball, its .sha256 and install.sh.
+# The release assets: the versioned tarball, install.sh and their SHA256SUMS.
 dist: sign
 	@if [ ! -f $(OUT)/kido-agent ]; then echo "error: $(OUT)/kido-agent is missing; a release needs the guest agent" >&2; exit 1; fi
 	rm -rf $(DIST_ROOT)
@@ -95,8 +99,18 @@ dist: sign
 	  --uid 0 --gid 0 --uname root --gname wheel -czf $(DIST_TAR) bin libexec share
 	rm -rf $(DIST_ROOT)
 	install -m 0755 install.sh $(DISTDIR)/install.sh
-	cd $(DISTDIR) && shasum -a 256 $(DIST_NAME).tar.gz > $(DIST_NAME).tar.gz.sha256
-	@cat $(DISTDIR)/$(DIST_NAME).tar.gz.sha256
+	rm -f $(DISTDIR)/SHA256SUMS $(DISTDIR)/SHA256SUMS.sig
+	cd $(DISTDIR) && shasum -a 256 $(DIST_NAME).tar.gz install.sh > SHA256SUMS
+	@cat $(DISTDIR)/SHA256SUMS
+
+sign-dist:
+	@test -f $(DISTDIR)/SHA256SUMS || { echo "error: run make dist first" >&2; exit 1; }
+	rm -f $(DISTDIR)/SHA256SUMS.sig
+	ssh-keygen -Y sign -f $(RELEASE_KEY) -n $(RELEASE_NAMESPACE) $(DISTDIR)/SHA256SUMS
+	@awk '{ print "kido namespaces=\"$(RELEASE_NAMESPACE)\" " $$1 " " $$2 }' $(RELEASE_PUB) > $(DISTDIR)/.allowed_signers
+	ssh-keygen -Y verify -f $(DISTDIR)/.allowed_signers -I kido -n $(RELEASE_NAMESPACE) \
+	  -s $(DISTDIR)/SHA256SUMS.sig < $(DISTDIR)/SHA256SUMS
+	@rm -f $(DISTDIR)/.allowed_signers
 
 install: sign
 	install -d $(BINDIR) $(LIBEXECDIR) $(DOCDIR)
@@ -124,7 +138,8 @@ clean:
 help:
 	@echo "make              build $(OUT)/kido, $(OUT)/kido-agent and $(OUT)/kido-vmm (VERSION=$(VERSION))"
 	@echo "make sign         ad-hoc sign $(OUT)/*; DEVELOPER_ID='Developer ID Application: ...' for a release"
-	@echo "make dist         $(DIST_TAR), its .sha256 and $(DISTDIR)/install.sh"
+	@echo "make dist         $(DIST_TAR), $(DISTDIR)/install.sh and $(DISTDIR)/SHA256SUMS"
+	@echo "make sign-dist    sign SHA256SUMS with RELEASE_KEY=$(RELEASE_KEY) (ssh-keygen -Y sign)"
 	@echo "make install      install into PREFIX=$(PREFIX) (DESTDIR is honored); then run: kido setup"
 	@echo "make uninstall    remove what install put there"
 	@echo "make test | vet   go test ./... | go vet ./..."

@@ -16,11 +16,11 @@ From source, with Go 1.26 and the Xcode command line tools:
     cd kido
     make                          # bin/kido, bin/kido-agent and bin/kido-vmm
     make install PREFIX=~/.local  # signs them ad hoc, installs bin/kido and libexec/kido/
-    make dist                     # dist/kido-VERSION-darwin-arm64.tar.gz, .sha256 and install.sh
+    make dist                     # dist/kido-VERSION-darwin-arm64.tar.gz, install.sh and SHA256SUMS
 
 From the first release on, there is also an install script and a Homebrew formula. The script puts
-kido into `~/.local` (no sudo), checks the release's SHA-256 and then runs `kido setup`. With
-`--image REF` it also pulls a Darwin image.
+kido into `~/.local` (no sudo), checks the release's signature and SHA-256 and then runs
+`kido setup`. With `--image REF` it also pulls a Darwin image.
 
     curl -fsSL https://kido.sh/install.sh | sh
     curl -fsSL https://kido.sh/install.sh | sh -s -- --prefix ~/opt/kido --version 0.1.0 --no-setup
