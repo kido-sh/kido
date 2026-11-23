@@ -26,6 +26,11 @@ kido into `~/.local` (no sudo), checks the release's signature and SHA-256 and t
     curl -fsSL https://kido.sh/install.sh | sh -s -- --prefix ~/opt/kido --version 0.1.0 --no-setup
     brew install kido-sh/tap/kido
 
+`kido upgrade` upgrades a kido from the install script or a release tarball. It downloads the
+latest release from GitHub and checks its signature and SHA-256. Then it replaces kido and its
+helpers. `kido upgrade --check` only tells you whether there is a newer release. A kido from
+Homebrew upgrades with `brew upgrade kido`.
+
 Shell completion: `eval "$(kido completion bash)"` (macOS's bash 3.2 cannot `source <(...)`),
 `source <(kido completion zsh)`, or `kido completion fish > ~/.config/fish/completions/kido.fish`.
 
@@ -167,6 +172,7 @@ files. They are not live bind mounts, and they need the QEMU backend.
 | `network` | User networks for the Virtualization.framework backend, macOS 26+ (`create --subnet --internal`, `ls`, `inspect`, `rm`, `prune`) |
 | `setup` | Install QEMU into KIDO_HOME, and pull a Darwin image with `--image` |
 | `doctor` | Check the Mac, QEMU, KIDO_HOME, images, disk space and that no Docker is needed |
+| `upgrade` | Replace this kido with the latest signed release (`--check`, `--version`) |
 | `info`, `version`, `completion` | System information, version, shell completion (bash, zsh, fish) |
 
 `ps`, `images`, `history`, `inspect`, `version` and `info` take `--format` (a Go template, `table`

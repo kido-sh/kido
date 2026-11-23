@@ -27,6 +27,15 @@
   directory (`..`, absolute paths, symlinks that point out).
 - **Downloads.** `kido setup` fetches QEMU over HTTPS only and checks a SHA-256 pinned in the
   binary. It unpacks with size limits and does not follow links out of its directory.
+- **Releases.** Every release has a `SHA256SUMS` file, signed with the kido release key by
+  `ssh-keygen -Y sign` in the namespace `release@kido.sh`. `install.sh` and `kido upgrade` install
+  nothing unless that signature and the SHA-256 match. The public key is
+  [internal/upgrade/release.pub](../internal/upgrade/release.pub). To check a release by hand, put
+  `release.pub`, `SHA256SUMS`, `SHA256SUMS.sig` and the tarball in one directory and run:
+
+      echo "kido namespaces=\"release@kido.sh\" $(cut -d' ' -f1,2 release.pub)" > allowed_signers
+      ssh-keygen -Y verify -f allowed_signers -I kido -n release@kido.sh -s SHA256SUMS.sig < SHA256SUMS
+      grep darwin-arm64 SHA256SUMS | shasum -a 256 -c -
 - **The guest's own crypto.** The guest's corecrypto is a fork that nobody has audited (see
   [kido-sh/darwin](https://github.com/kido-sh/darwin#security)). Do not rely on the guest's system
   crypto library to protect anything. The agent uses Go's own cryptographic code, but the random
