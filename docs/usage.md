@@ -95,9 +95,8 @@ uid, with or without a passwd entry. `kido push` and `kido pull` share credentia
   `com.apple.security.virtualization`. `make sign` builds and signs it as `bin/kido-vmm`, and
   `make install`, Homebrew and `install.sh` put it in `libexec/kido/`. kido looks for it in
   `$KIDO_VMM`, next to the `kido` binary, and in `../libexec/kido`. Streams are much faster than
-  under QEMU (exec runs at about 500-800 MB/s). This backend has no copy mounts and no UDP port
-  publishing yet, and `logs --console` stays empty, because the guest has no virtio-console driver
-  yet.
+  under QEMU (exec runs at about 500-800 MB/s). This backend has no UDP port publishing yet, and
+  `logs --console` stays empty, because the guest has no virtio-console driver yet.
 
 ## Networks
 
@@ -138,7 +137,7 @@ uid, with or without a passwd entry. `kido push` and `kido pull` share credentia
 ## Copy mounts: `-v` and `--mount type=bind`
 
 `-v HOST:CONTAINER[:ro]` and `--mount type=bind,source=HOST,target=CONTAINER[,readonly]` copy
-files. They are not live bind mounts, and they need the QEMU backend.
+files. They are not live bind mounts.
 
 - The host directory or file is copied in as a snapshot at every boot (create, start).
 - Read-write mounts copy new and changed files back at `kido stop`, at the end of `kido run` (also

@@ -495,6 +495,7 @@ static void usage(void) {
   fprintf(stderr, "usage: kido-vmm --kernel IMAGE --initrd CPIO --disk RAW --cmdline-file FILE [--cpus N] [--memory MB]\n"
                   "               [--mac MAC] [--console FILE [--console-max BYTES]] [--state-file FILE] [--disk-sync full|fsync|none]\n"
                   "               [--network FILE] [--forward tcp:HOSTIP:HOSTPORT:GUESTIP:GUESTPORT ...]\n"
+                  "               [--extra-disk RAW ...] [--extra-disk-ro RAW ...]\n"
                   "       kido-vmm hold-network --subnet A.B.C.D/N [--host-only] --network FILE --users FILE\n");
   exit(2);
 }
@@ -526,6 +527,8 @@ int main(int argc, const char **argv) {
     NSInteger cpus = 2, memoryMB = 1024;
     long long consoleMax = 2 << 20;
     NSMutableArray<NSValue *> *forwards = [NSMutableArray array];
+    NSMutableArray<NSString *> *extraDisks = [NSMutableArray array];
+    NSMutableArray<NSNumber *> *extraReadOnly = [NSMutableArray array];
     for (int i = 1; i < argc; i++) {
       const char *a = argv[i];
       if (i + 1 >= argc) usage();
@@ -542,7 +545,10 @@ int main(int argc, const char **argv) {
       else if (!strcmp(a, "--state-file")) gStateFile = v;
       else if (!strcmp(a, "--disk-sync")) sync = v;
       else if (!strcmp(a, "--network")) network = v;
-      else if (!strcmp(a, "--forward")) {
+      else if (!strcmp(a, "--extra-disk") || !strcmp(a, "--extra-disk-ro")) {
+        [extraDisks addObject:v];
+        [extraReadOnly addObject:@(strcmp(a, "--extra-disk-ro") == 0)];
+      } else if (!strcmp(a, "--forward")) {
         forward_t *f = parseForward(v.UTF8String);
         if (!f) {
           fprintf(stderr, "kido-vmm: bad --forward %s\n", v.UTF8String);
@@ -608,7 +614,22 @@ int main(int argc, const char **argv) {
       fprintf(stderr, "kido-vmm: disk: %s\n", error.localizedDescription.UTF8String);
       return 1;
     }
-    config.storageDevices = @[ [[VZVirtioBlockDeviceConfiguration alloc] initWithAttachment:attachment] ];
+    NSMutableArray<VZStorageDeviceConfiguration *> *storage =
+        [NSMutableArray arrayWithObject:[[VZVirtioBlockDeviceConfiguration alloc] initWithAttachment:attachment]];
+    for (NSUInteger i = 0; i < extraDisks.count; i++) {
+      VZDiskImageStorageDeviceAttachment *extra =
+          [[VZDiskImageStorageDeviceAttachment alloc] initWithURL:[NSURL fileURLWithPath:extraDisks[i]]
+                                                         readOnly:extraReadOnly[i].boolValue
+                                                      cachingMode:VZDiskImageCachingModeAutomatic
+                                              synchronizationMode:syncMode
+                                                            error:&error];
+      if (!extra) {
+        fprintf(stderr, "kido-vmm: disk %s: %s\n", extraDisks[i].UTF8String, error.localizedDescription.UTF8String);
+        return 1;
+      }
+      [storage addObject:[[VZVirtioBlockDeviceConfiguration alloc] initWithAttachment:extra]];
+    }
+    config.storageDevices = storage;
 
     VZVirtioNetworkDeviceConfiguration *net = [[VZVirtioNetworkDeviceConfiguration alloc] init];
     if (!network) {

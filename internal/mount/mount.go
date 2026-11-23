@@ -73,16 +73,18 @@ func List(dir string) ([]engine.Mount, error) {
 	return out, nil
 }
 
-// QEMUArgs packs every source of the container in dir into a disk and returns the QEMU arguments
-// that attach them, or nil when the container has no mounts. QEMU must run in dir.
-func QEMUArgs(dir string) ([]string, error) {
+type Disk struct {
+	ID       string
+	File     string
+	ReadOnly bool
+}
+
+// Disks packs every source of the container in dir into a disk and returns the disks to attach, or
+// nil when the container has no mounts. Each File is relative to dir.
+func Disks(dir string) ([]Disk, error) {
 	st, err := load(dir)
-	if err != nil {
+	if err != nil || st == nil || len(st.Mounts) == 0 {
 		return nil, err
-	}
-	if st == nil || len(st.Mounts) == 0 {
-		os.Remove(filepath.Join(dir, cfgFile))
-		return nil, nil
 	}
 	ddir := filepath.Join(dir, diskDir)
 	if err := os.MkdirAll(ddir, 0o700); err != nil {
@@ -93,7 +95,7 @@ func QEMUArgs(dir string) ([]string, error) {
 		return nil, err
 	}
 	home := filepath.Dir(filepath.Dir(dir))
-	var cfg strings.Builder
+	var disks []Disk
 	for i := range st.Mounts {
 		m := &st.Mounts[i]
 		in := filepath.Join(ddir, fmt.Sprintf("in-%d.img", i))
@@ -102,7 +104,7 @@ func QEMUArgs(dir string) ([]string, error) {
 			return nil, fmt.Errorf("mount %s: %w", m.Source, err)
 		}
 		m.File, m.Size, m.Collected = file, size, false
-		writeDrive(&cfg, fmt.Sprintf("kidoin%d", i), diskDir+"/"+filepath.Base(in), true)
+		disks = append(disks, Disk{ID: fmt.Sprintf("kidoin%d", i), File: diskDir + "/" + filepath.Base(in), ReadOnly: true})
 		if m.ReadOnly {
 			continue
 		}
@@ -117,15 +119,49 @@ func QEMUArgs(dir string) ([]string, error) {
 		if err := makeOutDisk(out, header(st.Token, "out", i)); err != nil {
 			return nil, err
 		}
-		writeDrive(&cfg, fmt.Sprintf("kidoout%d", i), diskDir+"/"+filepath.Base(out), false)
-	}
-	if err := writeFile(filepath.Join(dir, cfgFile), []byte(cfg.String())); err != nil {
-		return nil, err
+		disks = append(disks, Disk{ID: fmt.Sprintf("kidoout%d", i), File: diskDir + "/" + filepath.Base(out)})
 	}
 	if err := save(dir, st); err != nil {
 		return nil, err
 	}
+	return disks, nil
+}
+
+// QEMUArgs returns the QEMU arguments that attach the container's Disks. QEMU must run in dir.
+func QEMUArgs(dir string) ([]string, error) {
+	disks, err := Disks(dir)
+	if err != nil {
+		return nil, err
+	}
+	if len(disks) == 0 {
+		os.Remove(filepath.Join(dir, cfgFile))
+		return nil, nil
+	}
+	var cfg strings.Builder
+	for _, d := range disks {
+		writeDrive(&cfg, d.ID, d.File, d.ReadOnly)
+	}
+	if err := writeFile(filepath.Join(dir, cfgFile), []byte(cfg.String())); err != nil {
+		return nil, err
+	}
 	return []string{"-readconfig", cfgFile}, nil
+}
+
+// VZArgs returns the kido-vmm arguments that attach the container's Disks. kido-vmm must run in dir.
+func VZArgs(dir string) ([]string, error) {
+	disks, err := Disks(dir)
+	if err != nil {
+		return nil, err
+	}
+	var args []string
+	for _, d := range disks {
+		flag := "--extra-disk"
+		if d.ReadOnly {
+			flag = "--extra-disk-ro"
+		}
+		args = append(args, flag, d.File)
+	}
+	return args, nil
 }
 
 // keepUnapplied moves aside the changes of an earlier boot that were collected but never applied,

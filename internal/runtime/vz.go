@@ -20,6 +20,7 @@ import (
 
 	"github.com/kido-sh/kido/internal/engine"
 	"github.com/kido-sh/kido/internal/imageref"
+	"github.com/kido-sh/kido/internal/mount"
 	"github.com/kido-sh/kido/internal/proto"
 )
 
@@ -302,6 +303,10 @@ func (r *Runtime) vzBoot(ctx context.Context, info *Info) error {
 	for _, f := range []string{"agent.port", "vmm.state", "boot-args"} {
 		os.Remove(filepath.Join(dir, f))
 	}
+	margs, err := mount.VZArgs(dir)
+	if err != nil {
+		return err
+	}
 	for _, f := range []string{"console.log", "vmm.log"} {
 		if err := os.WriteFile(filepath.Join(dir, f), nil, 0o600); err != nil {
 			return err
@@ -336,6 +341,7 @@ func (r *Runtime) vzBoot(ctx context.Context, info *Info) error {
 	for _, p := range info.Ports {
 		args = append(args, "--forward", fmt.Sprintf("tcp:%s:%d:%s:%d", p.HostIP, p.HostPort, nw.Guest, p.GuestPort))
 	}
+	args = append(args, margs...)
 	vmm := vmmPath()
 	if vmm == "" {
 		os.Remove(filepath.Join(dir, "boot-args"))
@@ -381,7 +387,17 @@ func (r *Runtime) vzBoot(ctx context.Context, info *Info) error {
 
 	err = r.waitAgent(ctx, info.ID, agentPort, exited)
 	if err == nil {
-		return nil
+		if err = mount.Populate(ctx, dir, r.mountGuest(info.ID)); err == nil {
+			return nil
+		}
+		cmd.Process.Kill()
+		select {
+		case <-exited:
+		case <-time.After(5 * time.Second):
+		}
+		info.PID, info.FinishedAt, info.Error = 0, time.Now().UTC(), err.Error()
+		r.save(info)
+		return err
 	}
 	cmd.Process.Kill()
 	select {

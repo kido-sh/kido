@@ -126,13 +126,15 @@ check  "run -d ignoring TERM"   0 "$kido" run -d --name e2e-i darwin /bin/sh -c 
 check  "stop -t 1 then KILL"    0 "$kido" stop -t 1 e2e-i
 check  "137 after the timeout"  0 sh -c 'test "$("$1" wait e2e-i)" = 137' sh "$kido"
 check  "rm stopped containers"  0 "$kido" rm e2e-s e2e-i
-if [[ ${KIDO_BACKEND:-} != vz ]]; then
-  mkdir -p "$KIDO_HOME/vol"
-  check  "run -d -v TERM writes"  0 "$kido" run -d --name e2e-v -v "$KIDO_HOME/vol:/data" darwin /bin/sh -c 'trap "echo bye > /data/bye; exit 0" TERM; while :; do sleep 0.1; done'
-  check  "stop collects after TERM" 0 "$kido" stop e2e-v
-  checko "-v has the TERM write"  0 "bye" cat "$KIDO_HOME/vol/bye"
-  check  "rm -v container"        0 "$kido" rm e2e-v
-fi
+mkdir -p "$KIDO_HOME/vol"
+check  "run -d -v TERM writes"  0 "$kido" run -d --name e2e-v -v "$KIDO_HOME/vol:/data" darwin /bin/sh -c 'trap "echo bye > /data/bye; exit 0" TERM; while :; do sleep 0.1; done'
+check  "stop collects after TERM" 0 "$kido" stop e2e-v
+checko "-v has the TERM write"  0 "bye" cat "$KIDO_HOME/vol/bye"
+check  "rm -v container"        0 "$kido" rm e2e-v
+echo hi > "$KIDO_HOME/vol/in"
+checko "run --rm -v :ro reads"  0 "hi" "$kido" run --rm -v "$KIDO_HOME/vol:/data:ro" darwin cat /data/in
+check  "run --rm -v writes"     0 "$kido" run --rm -v "$KIDO_HOME/vol:/data" darwin /bin/sh -c 'echo new > /data/new'
+checko "-v copied the write back" 0 "new" cat "$KIDO_HOME/vol/new"
 checko "run without IMAGE"    125 "\"kido run\" requires at least 1 argument." "$kido" run
 check  "no full help for it"    0 sh -c '! "$1" run 2>&1 | grep -q Options:' sh "$kido"
 checko "build without PATH"   125 "requires exactly 1 argument" "$kido" build -t x

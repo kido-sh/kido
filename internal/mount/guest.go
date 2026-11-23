@@ -112,7 +112,7 @@ func findDisks(ctx context.Context, g Guest, token string) (map[string]string, e
 	return disks, nil
 }
 
-// Populate copies each source packed by QEMUArgs to its target; it runs once the agent answers.
+// Populate copies each source packed by Disks to its target; it runs once the agent answers.
 func Populate(ctx context.Context, dir string, g Guest) error {
 	st, err := load(dir)
 	if st == nil || len(st.Mounts) == 0 {

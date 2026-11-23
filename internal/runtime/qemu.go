@@ -96,9 +96,6 @@ func (r *Runtime) prepare(ctx context.Context, opts engine.CreateOptions) (*Info
 	if err != nil {
 		return nil, err
 	}
-	if len(opts.Mounts) > 0 && r.Backend == backendVZ {
-		return nil, errors.New("mounts (-v, --mount) need the QEMU backend for now")
-	}
 	if err := mount.Check(opts.Mounts); err != nil {
 		return nil, err
 	}
