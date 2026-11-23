@@ -44,7 +44,7 @@ func (e *MissingLibrariesError) Error() string {
 		e.Dir, len(e.Missing), strings.Join(e.Missing, "\n  "))
 	if f := HomebrewFormulas(e.Missing); len(f) > 0 {
 		msg += "\nThis QEMU build takes them from Homebrew. Install them with\n  brew install " + strings.Join(f, " ") +
-			"\nand run `kido setup` again (nothing is downloaded twice), or set KIDO_QEMU to a QEMU that runs here."
+			"\nand run `KIDO_BACKEND=qemu kido setup` again (nothing is downloaded twice), or set KIDO_QEMU to a QEMU that runs here."
 	}
 	return msg
 }

@@ -15,19 +15,22 @@ import (
 	"github.com/kido-sh/kido/internal/setup"
 )
 
+const defaultBaseImage = "ghcr.io/kido-sh/darwin"
+
 func init() {
-	register("setup", "Install QEMU into KIDO_HOME (and pull a base image with --image)", runSetup)
+	register("setup", "Pull the base image, and install QEMU for the qemu backend", runSetup)
 }
 
 func runSetup(ctx context.Context, args []string) int {
 	fl := ctrFlags("setup", "[OPTIONS]\n\n"+
-		"Downloads QEMU "+setup.PinnedQEMU.Version+" for darwin arm64 from github.com/cocoa-xu/qemu-build, checks its\n"+
-		"pinned SHA-256, unpacks what kido needs into KIDO_HOME/qemu, signs it for Hypervisor.framework\n"+
-		"when needed, checks that it starts and makes it the QEMU kido uses (KIDO_QEMU still wins).\n"+
-		"Running it again downloads nothing.")
-	image := fl.String("image", "", "Also pull this base image (REMOTE_REF) from an OCI registry")
-	imageName := fl.String("image-name", "darwin:latest", "Local NAME[:TAG] for the --image pull")
-	force := fl.Bool("force", false, "Unpack QEMU again even when KIDO_QEMU is set or the version is installed, and replace an existing --image-name")
+		"Pulls the base image "+defaultBaseImage+" as darwin:latest. With the qemu backend\n"+
+		"(KIDO_BACKEND=qemu) or --qemu-url, it also downloads QEMU "+setup.PinnedQEMU.Version+" for darwin arm64 from\n"+
+		"github.com/cocoa-xu/qemu-build, checks its pinned SHA-256, unpacks what kido needs into\n"+
+		"KIDO_HOME/qemu, signs it for Hypervisor.framework when needed, checks that it starts and makes it\n"+
+		"the QEMU kido uses (KIDO_QEMU still wins). Running it again downloads nothing.")
+	image := fl.String("image", defaultBaseImage, "The base image (REMOTE_REF) to pull; an empty one pulls nothing")
+	imageName := fl.String("image-name", "darwin:latest", "Local NAME[:TAG] for the base image")
+	force := fl.Bool("force", false, "Pull the base image again over --image-name, and unpack QEMU again even when KIDO_QEMU is set or the version is installed")
 	qemuURL := fl.String("qemu-url", "", "Install QEMU from this https URL or local .tar.xz instead of the pinned release")
 	qemuSHA := fl.String("qemu-sha256", "", "SHA-256 of the --qemu-url archive (required with it)")
 	qemuVersion := fl.String("qemu-version", "", "Directory name for --qemu-url under KIDO_HOME/qemu (default: custom-<sha prefix>)")
@@ -46,45 +49,53 @@ func runSetup(ctx context.Context, args []string) int {
 	if err != nil {
 		return setupFail(err)
 	}
+	backend, err := runtime.BackendFromEnv()
+	if err != nil {
+		return setupFail(err)
+	}
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt)
 	defer stop()
 
 	status := 0
-	env := os.Getenv("KIDO_QEMU")
-	if env != "" && *qemuURL == "" && !*force {
-		if fi, err := os.Stat(env); err != nil || !fi.Mode().IsRegular() || fi.Mode().Perm()&0o111 == 0 {
-			status = setupFail(fmt.Errorf("KIDO_QEMU=%s is not an executable file: fix or unset it (then kido setup installs QEMU)", env))
-		} else {
-			fmt.Fprintf(os.Stderr, "KIDO_QEMU is set, so kido uses %s and setup installs no QEMU.\n"+
-				"Unset KIDO_QEMU to use the QEMU that kido setup installs (or pass --force to install it anyway).\n", env)
-		}
-	} else {
-		res, err := setup.Install(ctx, setup.Options{Home: home, Release: rel, Force: *force, Log: os.Stderr})
-		if err != nil {
-			status = setupFail(err)
-		} else {
-			fmt.Printf("QEMU ready: %s\n  %s -> %s\n", res.Version, filepath.Join(setup.QEMUDir(home), "current"), rel.Version)
-			if n := len(res.Libraries.External); n > 0 {
-				fmt.Printf("  note: it loads %d libraries from outside %s (%s); it stops working if they go away\n",
-					n, res.Dir, strings.Join(setup.HomebrewFormulas(res.Libraries.External), ", "))
-			}
-			if env != "" {
-				fmt.Printf("  note: KIDO_QEMU=%s still takes precedence; unset it to use this QEMU\n", env)
-			}
-		}
+	if backend == "qemu" || *qemuURL != "" {
+		status = setupQEMU(ctx, home, rel, *qemuURL != "", *force)
 	}
-
 	if *image != "" {
 		if st := setupPull(ctx, home, *image, *imageName, *force); st != 0 {
 			status = st
 		}
 	} else if !setupHaveImages(home) {
-		fmt.Println("No image yet: pull one with `kido setup --image REMOTE_REF`, or import one with `kido image import DIR darwin`.")
+		fmt.Println("No image yet: `kido setup` pulls " + defaultBaseImage + ", and `kido image import DIR darwin` imports one.")
 	}
 	if status == 0 {
 		fmt.Println("Run `kido doctor` to check the whole setup.")
 	}
 	return status
+}
+
+func setupQEMU(ctx context.Context, home string, rel setup.Release, custom, force bool) int {
+	env := os.Getenv("KIDO_QEMU")
+	if env != "" && !custom && !force {
+		if fi, err := os.Stat(env); err != nil || !fi.Mode().IsRegular() || fi.Mode().Perm()&0o111 == 0 {
+			return setupFail(fmt.Errorf("KIDO_QEMU=%s is not an executable file: fix or unset it, then run this again", env))
+		}
+		fmt.Fprintf(os.Stderr, "KIDO_QEMU is set, so kido uses %s and setup installs no QEMU.\n"+
+			"Unset KIDO_QEMU to use the QEMU that kido setup installs (or pass --force to install it anyway).\n", env)
+		return 0
+	}
+	res, err := setup.Install(ctx, setup.Options{Home: home, Release: rel, Force: force, Log: os.Stderr})
+	if err != nil {
+		return setupFail(err)
+	}
+	fmt.Printf("QEMU ready: %s\n  %s -> %s\n", res.Version, filepath.Join(setup.QEMUDir(home), "current"), rel.Version)
+	if n := len(res.Libraries.External); n > 0 {
+		fmt.Printf("  note: it loads %d libraries from outside %s (%s); it stops working if they go away\n",
+			n, res.Dir, strings.Join(setup.HomebrewFormulas(res.Libraries.External), ", "))
+	}
+	if env != "" {
+		fmt.Printf("  note: KIDO_QEMU=%s still takes precedence; unset it to use this QEMU\n", env)
+	}
+	return 0
 }
 
 func setupRelease(url, sha, version string) (setup.Release, error) {

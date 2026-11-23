@@ -25,12 +25,11 @@ git clone https://github.com/kido-sh/kido.git
 cd kido
 make install PREFIX=~/.local
 export PATH="$HOME/.local/bin:$PATH"
-kido setup --image ghcr.io/kido-sh/darwin
+kido setup
 kido run --rm darwin sw_vers
 ```
 
-`kido setup` downloads QEMU and the Darwin image. Together they are about 130 MB. If QEMU needs
-libraries from Homebrew, `kido setup` tells you which ones to install.
+`kido setup` pulls the Darwin image, a download of about 40 MB.
 
 ## Examples
 

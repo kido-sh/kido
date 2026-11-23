@@ -226,7 +226,7 @@ func checkHypervisor() checkResult {
 // qemu-img next to it.
 func checkQEMU(ctx context.Context, home string) []checkResult {
 	const name = "QEMU"
-	setupFix := fmt.Sprintf("run `kido setup` (installs QEMU %s into %s), or set KIDO_QEMU to the absolute path of a qemu-system-aarch64 signed for HVF",
+	setupFix := fmt.Sprintf("run `KIDO_BACKEND=qemu kido setup` (installs QEMU %s into %s), or set KIDO_QEMU to the absolute path of a qemu-system-aarch64 signed for HVF",
 		setup.PinnedQEMU.Version, setup.QEMUDir(home))
 	q, err := setup.FindQEMU(home)
 	if errors.Is(err, setup.ErrNoQEMU) {
@@ -257,7 +257,7 @@ func checkQEMU(ctx context.Context, home string) []checkResult {
 	const entName = "QEMU entitlement"
 	signFix := "sign " + q.Path + " with the " + setup.HypervisorEntitlement + " entitlement (README: Troubleshooting)"
 	if q.Source == setup.SourceSetup {
-		signFix = "kido setup --force"
+		signFix = "KIDO_BACKEND=qemu kido setup --force"
 	}
 	switch ok, err := setup.HasEntitlement(q.Path, setup.HypervisorEntitlement); {
 	case err != nil:
@@ -271,7 +271,7 @@ func checkQEMU(ctx context.Context, home string) []checkResult {
 	const imgName = "qemu-img"
 	imgFix := "put qemu-img from the same QEMU build next to " + filepath.Base(q.Path)
 	if q.Source == setup.SourceSetup {
-		imgFix = "kido setup --force"
+		imgFix = "KIDO_BACKEND=qemu kido setup --force"
 	}
 	if err := isExecutableFile(q.Img); err != nil {
 		return append(results, fail(imgName, fmt.Sprintf("%s: %v", q.Img, err), imgFix))
@@ -373,7 +373,7 @@ func checkDiskSpace(home string) checkResult {
 func checkImages(home string) checkResult {
 	const name = "Images"
 	dir := filepath.Join(home, "images")
-	fix := "pull one: kido setup --image REMOTE_REF; or import one: kido image import DIR darwin"
+	fix := "run `kido setup`, which pulls " + defaultBaseImage + ", or import one: kido image import DIR darwin"
 	manifests, _ := filepath.Glob(filepath.Join(dir, "*", "*", "image.json"))
 	var refs []string
 	for _, m := range manifests {

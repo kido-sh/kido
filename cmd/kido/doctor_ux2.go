@@ -45,5 +45,5 @@ func checkUnpackedQEMU(home string) []checkResult {
 		}
 	}
 	return []checkResult{fail("QEMU", fmt.Sprintf("QEMU %s is unpacked in %s, but kido setup did not finish installing it", version, where),
-		"run `kido setup` again and read the error it ends with")}
+		"run `KIDO_BACKEND=qemu kido setup` again and read the error it ends with")}
 }

@@ -1,6 +1,7 @@
 #!/bin/sh
 # Install kido for the current user, without sudo: kido goes into PREFIX (default ~/.local), then
-# `kido setup` downloads QEMU into KIDO_HOME (default ~/.kido). Nothing else on the system changes.
+# `kido setup` pulls the Darwin image into KIDO_HOME (default ~/.kido). Nothing else on the system
+# changes.
 #
 #   curl -fsSL https://kido.sh/install.sh | sh
 #   curl -fsSL https://github.com/kido-sh/kido/releases/latest/download/install.sh | sh
@@ -8,8 +9,8 @@
 #   sh install.sh --tarball dist/kido-0.1.0-darwin-arm64.tar.gz    # a local `make dist`
 #
 # Options (or environment): --prefix DIR (KIDO_PREFIX), --version V (KIDO_VERSION, default: the
-# latest release), --repo OWNER/NAME (KIDO_REPO), --tarball FILE, --image REMOTE_REF (KIDO_IMAGE: a
-# base image for `kido setup --image`), --no-setup (KIDO_NO_SETUP=1).
+# latest release), --repo OWNER/NAME (KIDO_REPO), --tarball FILE, --image REMOTE_REF (KIDO_IMAGE:
+# the base image `kido setup` pulls, default ghcr.io/kido-sh/darwin), --no-setup (KIDO_NO_SETUP=1).
 #
 # A download is installed only if its SHA256SUMS carries the kido release signature and lists its
 # SHA-256. Everything runs inside main, so a download cut short executes nothing.
@@ -141,7 +142,7 @@ main() {
 	esac
 
 	if [ "$run_setup" = 0 ]; then
-		say "Next: $prefix/bin/kido setup   (downloads QEMU into KIDO_HOME, ~/.kido by default)"
+		say "Next: $prefix/bin/kido setup   (pulls the Darwin image into KIDO_HOME, ~/.kido by default)"
 		return 0
 	fi
 	set -- setup

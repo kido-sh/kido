@@ -6,7 +6,8 @@
   Virtualization.framework backend need macOS 26.
 - Disk space for images and for what each container writes. The Darwin image has an 8 GiB root
   file system, but it is stored sparse and takes about 130 MB.
-- QEMU 11.1 with Hypervisor.framework support, only for the QEMU backend. `kido setup` installs it.
+- QEMU 11.1 with Hypervisor.framework support, only for the QEMU backend.
+  `KIDO_BACKEND=qemu kido setup` installs it.
 
 ## Install
 
@@ -20,7 +21,8 @@ From source, with Go 1.26 and the Xcode command line tools:
 
 From the first release on, there is also an install script and a Homebrew formula. The script puts
 kido into `~/.local` (no sudo), checks the release's signature and SHA-256 and then runs
-`kido setup`. With `--image REF` it also pulls a Darwin image.
+`kido setup`, which pulls the Darwin image. `--image REF` pulls another base image, and
+`--no-setup` skips `kido setup`.
 
     curl -fsSL https://kido.sh/install.sh | sh
     curl -fsSL https://kido.sh/install.sh | sh -s -- --prefix ~/opt/kido --version 0.1.0 --no-setup
@@ -36,17 +38,19 @@ Shell completion: `eval "$(kido completion bash)"` (macOS's bash 3.2 cannot `sou
 
 ## Setup
 
-    kido setup --image ghcr.io/kido-sh/darwin
+    kido setup
 
-This installs QEMU and pulls the Darwin image as `darwin:latest` (`--image-name` picks another
-name). Running it again downloads nothing new.
+This pulls the Darwin image `ghcr.io/kido-sh/darwin` as `darwin:latest`. `--image` names another
+base image, and `--image-name` another local name. Running it again downloads nothing new.
+`kido setup --force` pulls the image again, which needs every container of the old one removed.
 
-`kido setup` downloads QEMU 11.1.3 for darwin arm64 (85.5 MB, from github.com/cocoa-xu/qemu-build)
-over HTTPS and checks it against a SHA-256 pinned in kido. It unpacks only what kido uses (about
-50 MB) into `~/.kido/qemu/11.1.3`. If the signature of `qemu-system-aarch64` lacks the
-`com.apple.security.hypervisor` entitlement, it signs it again. Then it checks that QEMU and
-qemu-img start, and points `~/.kido/qemu/current` at that version. `$KIDO_QEMU` takes precedence:
-an absolute path to `qemu-system-aarch64`, with qemu-img next to it.
+The QEMU backend also needs QEMU. `KIDO_BACKEND=qemu kido setup` downloads QEMU 11.1.3 for darwin
+arm64 (85.5 MB, from github.com/cocoa-xu/qemu-build) over HTTPS and checks it against a SHA-256
+pinned in kido. It unpacks only what kido uses (about 50 MB) into `~/.kido/qemu/11.1.3`. If the
+signature of `qemu-system-aarch64` lacks the `com.apple.security.hypervisor` entitlement, it signs
+it again. Then it checks that QEMU and qemu-img start, and points `~/.kido/qemu/current` at that
+version. `$KIDO_QEMU` takes precedence: an absolute path to `qemu-system-aarch64`, with qemu-img
+next to it.
 
 The pinned QEMU build loads some libraries from Homebrew (`/opt/homebrew/opt/...`). If they are
 missing, `kido setup` stops and names them, for example `brew install capstone dtc gnutls snappy
@@ -170,7 +174,7 @@ files. They are not live bind mounts.
 | `pull`, `push`, `login` | OCI registries; credentials are shared with Docker's `~/.docker/config.json` |
 | `container`, `image`, `system` | Docker-style groups, with `ls`, `prune`, `system df` and `system info` |
 | `network` | User networks for the Virtualization.framework backend, macOS 26+ (`create --subnet --internal`, `ls`, `inspect`, `rm`, `prune`) |
-| `setup` | Install QEMU into KIDO_HOME, and pull a Darwin image with `--image` |
+| `setup` | Pull the Darwin image, and install QEMU for the QEMU backend |
 | `doctor` | Check the Mac, the VM backend, KIDO_HOME, images, disk space and that no Docker is needed |
 | `upgrade` | Replace this kido with the latest signed release (`--check`, `--version`) |
 | `info`, `version`, `completion` | System information, version, shell completion (bash, zsh, fish) |

@@ -2,12 +2,12 @@
 
 Start with `kido doctor`. Every failed check prints its fix.
 
-- **QEMU not found**: run `kido setup`, or set `KIDO_QEMU`.
+- **QEMU not found**: run `KIDO_BACKEND=qemu kido setup`, or set `KIDO_QEMU`.
 - **QEMU libraries: N missing**: the QEMU build expects some Homebrew libraries. Install the listed
   formulas, or use a self-contained QEMU (see [Setup](usage.md#setup)).
 - **QEMU entitlement**: Hypervisor.framework refuses to start QEMU without
-  `com.apple.security.hypervisor`. `kido setup --force` signs the QEMU it installed again. Sign your
-  own QEMU (`KIDO_QEMU`) with:
+  `com.apple.security.hypervisor`. `KIDO_BACKEND=qemu kido setup --force` signs the QEMU it installed
+  again. Sign your own QEMU (`KIDO_QEMU`) with:
 
       cat > hvf.entitlements <<'EOF'
       <?xml version="1.0" encoding="UTF-8"?>

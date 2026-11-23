@@ -50,7 +50,7 @@ type QEMU struct {
 }
 
 // ErrNoQEMU means that neither KIDO_QEMU nor an installed QEMU exists.
-var ErrNoQEMU = errors.New("QEMU not found: run `kido setup` to install it, " +
+var ErrNoQEMU = errors.New("QEMU not found: run `KIDO_BACKEND=qemu kido setup` to install it, " +
 	"or set KIDO_QEMU to the absolute path of a qemu-system-aarch64 signed for Hypervisor.framework")
 
 // QEMUDir is where kido setup installs QEMU: one directory per version and a "current" symlink.

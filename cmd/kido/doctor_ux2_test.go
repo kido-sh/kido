@@ -36,7 +36,7 @@ func TestCheckUnpackedQEMU(t *testing.T) {
 	}
 	r := checkUnpackedQEMU(home)
 	if len(r) == 0 || r[0].status != checkFail || !strings.Contains(r[0].detail, "is unpacked in") ||
-		strings.Contains(r[0].fix, "run `kido setup` (installs") {
+		strings.Contains(r[0].fix, "run `KIDO_BACKEND=qemu kido setup` (installs") {
 		t.Fatalf("got %+v", r)
 	}
 }
