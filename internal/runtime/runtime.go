@@ -70,7 +70,7 @@ func New(home string) (*Runtime, error) {
 			return nil, err
 		}
 	}
-	backend, err := backendFromEnv()
+	backend, err := BackendFromEnv()
 	if err != nil {
 		return nil, err
 	}

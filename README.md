@@ -2,7 +2,7 @@
 
 kido runs macOS command-line tools in small Darwin VMs on Apple Silicon Macs. You use it like
 Docker, with `kido run`, `kido build` and `kido push`. Each container boots a real Darwin kernel
-(XNU) in about half a second.
+(XNU) in under a second.
 
 ```console
 $ kido run --rm darwin sw_vers
@@ -82,9 +82,8 @@ $ kido pull ghcr.io/YOUR-NAME/yq
 
 ## How it works
 
-Each container is its own small VM, with its own kernel, memory and disk. kido starts it with QEMU
-and Hypervisor.framework. Set `KIDO_BACKEND=vz` to use Apple's Virtualization.framework instead.
-That backend is still experimental. The system inside is
+Each container is its own small VM, with its own kernel, memory and disk. kido starts it with
+Apple's Virtualization.framework. Set `KIDO_BACKEND=qemu` to use QEMU instead. The system inside is
 [KidoDarwin](https://github.com/kido-sh/darwin). It has Apple's open-source XNU kernel, launchd and
 a small set of Unix tools. A small agent in the VM runs your commands. kido talks to it over an
 encrypted and authenticated channel. [docs/security.md](docs/security.md) explains how.

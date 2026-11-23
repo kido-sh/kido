@@ -38,24 +38,24 @@ const (
 	dhcpLeases      = "/var/db/dhcpd_leases"
 )
 
-func backendFromEnv() (string, error) {
+func BackendFromEnv() (string, error) {
 	switch b := os.Getenv("KIDO_BACKEND"); b {
-	case "", backendQEMU:
-		return backendQEMU, nil
-	case backendVZ:
+	case "", backendVZ:
 		return backendVZ, nil
+	case backendQEMU:
+		return backendQEMU, nil
 	default:
-		return "", fmt.Errorf("KIDO_BACKEND=%q: must be %s or %s", b, backendQEMU, backendVZ)
+		return "", fmt.Errorf("KIDO_BACKEND=%q: must be %s or %s", b, backendVZ, backendQEMU)
 	}
 }
 
-// DevVMM is a development build of kido-vmm, the last place vmmPath looks. It is empty unless the
+// DevVMM is a development build of kido-vmm, the last place VMMPath looks. It is empty unless the
 // build sets it with -X, as `make DEV_VMM=PATH` does.
 var DevVMM string
 
-// vmmPath is $KIDO_VMM, kido-vmm next to the kido executable or in ../libexec/kido (the installed
+// VMMPath is $KIDO_VMM, kido-vmm next to the kido executable or in ../libexec/kido (the installed
 // layout), or DevVMM; "" when none exists.
-func vmmPath() string {
+func VMMPath() string {
 	if p := os.Getenv("KIDO_VMM"); p != "" {
 		return p
 	}
@@ -342,7 +342,7 @@ func (r *Runtime) vzBoot(ctx context.Context, info *Info) error {
 		args = append(args, "--forward", fmt.Sprintf("tcp:%s:%d:%s:%d", p.HostIP, p.HostPort, nw.Guest, p.GuestPort))
 	}
 	args = append(args, margs...)
-	vmm := vmmPath()
+	vmm := VMMPath()
 	if vmm == "" {
 		os.Remove(filepath.Join(dir, "boot-args"))
 		return errors.New("the vz backend needs kido-vmm: install it next to kido or in ../libexec/kido (make install does), or set KIDO_VMM")

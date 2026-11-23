@@ -6,7 +6,7 @@
   Virtualization.framework backend need macOS 26.
 - Disk space for images and for what each container writes. The Darwin image has an 8 GiB root
   file system, but it is stored sparse and takes about 130 MB.
-- QEMU 11.1 with Hypervisor.framework support, for the default backend. `kido setup` installs it.
+- QEMU 11.1 with Hypervisor.framework support, only for the QEMU backend. `kido setup` installs it.
 
 ## Install
 
@@ -88,15 +88,16 @@ uid, with or without a passwd entry. `kido push` and `kido pull` share credentia
 
 ## Backends
 
-- **QEMU** (the default): `qemu-system-aarch64 -machine virt -accel hvf` boots the guest's kernel
-  directly. It runs on a qcow2 overlay of the image's disk, behind QEMU's user-mode NAT.
-- **Virtualization.framework** (`KIDO_BACKEND=vz`, experimental): `kido-vmm` runs each VM on an
-  APFS clone of the image's disk, on vmnet. It is a small helper signed with
-  `com.apple.security.virtualization`. `make sign` builds and signs it as `bin/kido-vmm`, and
-  `make install`, Homebrew and `install.sh` put it in `libexec/kido/`. kido looks for it in
-  `$KIDO_VMM`, next to the `kido` binary, and in `../libexec/kido`. Streams are much faster than
-  under QEMU (exec runs at about 500-800 MB/s). This backend has no UDP port publishing yet, and
-  `logs --console` stays empty, because the guest has no virtio-console driver yet.
+- **Virtualization.framework** (the default): `kido-vmm` runs each VM on an APFS clone of the
+  image's disk, on vmnet. It is a small helper signed with `com.apple.security.virtualization`.
+  `make sign` builds and signs it as `bin/kido-vmm`, and `make install`, Homebrew and `install.sh`
+  put it in `libexec/kido/`. kido looks for it in `$KIDO_VMM`, next to the `kido` binary, and in
+  `../libexec/kido`. Streams are much faster than under QEMU (exec runs at about 500-800 MB/s).
+  This backend has no UDP port publishing yet, and `logs --console` stays empty, because the guest
+  has no virtio-console driver yet. macOS's Local Network privacy covers vmnet's network. Terminal
+  and SSH sessions are allowed, and any other app that runs kido asks once.
+- **QEMU** (`KIDO_BACKEND=qemu`): `qemu-system-aarch64 -machine virt -accel hvf` boots the guest's
+  kernel directly. It runs on a qcow2 overlay of the image's disk, behind QEMU's user-mode NAT.
 
 ## Networks
 
@@ -113,8 +114,8 @@ uid, with or without a passwd entry. `kido push` and `kido pull` share credentia
   vmnet network, subnet and bridge:
 
       kido network create [--subnet CIDR] [--internal] NAME     # also: ls, inspect, rm, prune
-      KIDO_BACKEND=vz kido run -d --network NAME darwin
-      KIDO_BACKEND=vz kido run -d --network none darwin
+      kido run -d --network NAME darwin
+      kido run -d --network none darwin
 
   - Containers on a network reach each other, the host (at .1, which also answers DNS) and the
     outside through NAT. `--internal` drops NAT and DNS. Containers on other networks cannot reach
@@ -170,7 +171,7 @@ files. They are not live bind mounts.
 | `container`, `image`, `system` | Docker-style groups, with `ls`, `prune`, `system df` and `system info` |
 | `network` | User networks for the Virtualization.framework backend, macOS 26+ (`create --subnet --internal`, `ls`, `inspect`, `rm`, `prune`) |
 | `setup` | Install QEMU into KIDO_HOME, and pull a Darwin image with `--image` |
-| `doctor` | Check the Mac, QEMU, KIDO_HOME, images, disk space and that no Docker is needed |
+| `doctor` | Check the Mac, the VM backend, KIDO_HOME, images, disk space and that no Docker is needed |
 | `upgrade` | Replace this kido with the latest signed release (`--check`, `--version`) |
 | `info`, `version`, `completion` | System information, version, shell completion (bash, zsh, fish) |
 
@@ -190,7 +191,7 @@ its RUN step.
 |---|---|
 | `KIDO_HOME` | State directory (default `~/.kido`): `qemu/`, `images/`, `containers/`, `networks/` |
 | `KIDO_QEMU` | Absolute path of `qemu-system-aarch64`; overrides what `kido setup` installed |
-| `KIDO_BACKEND` | `qemu` (default) or `vz` (experimental) |
+| `KIDO_BACKEND` | `vz` (default) or `qemu` |
 | `KIDO_VMM` | Path of the `kido-vmm` helper for the vz backend |
 | `KIDO_VZ_SUBNET` | vmnet's NAT network for the vz backend when it is not `192.168.64.0/24` (IPv4, /16 to /29) |
 | `DOCKER_CONFIG` | Where registry credentials are read and stored (default `~/.docker`) |

@@ -14,8 +14,11 @@ func TestCheckHomeLongPathWarns(t *testing.T) {
 	if err := os.Mkdir(home, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if r := checkHome(home); r.status != checkWarn || !strings.Contains(r.detail, "commit") {
+	if r := checkHome(home, "qemu"); r.status != checkWarn || !strings.Contains(r.detail, "commit") {
 		t.Fatalf("got %v %q", r.status, r.detail)
+	}
+	if r := checkHome(home, "vz"); r.status != checkPass {
+		t.Fatalf("vz: got %v %q", r.status, r.detail)
 	}
 }
 

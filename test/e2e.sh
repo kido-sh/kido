@@ -4,8 +4,8 @@
 set -uo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 img=$1
-if [[ ${KIDO_BACKEND:-qemu} == qemu && -z ${KIDO_QEMU:-} ]]; then
-  echo "e2e: set KIDO_QEMU to a qemu-system-aarch64 for the QEMU backend, or KIDO_BACKEND=vz" >&2
+if [[ ${KIDO_BACKEND:-vz} == qemu && -z ${KIDO_QEMU:-} ]]; then
+  echo "e2e: the QEMU backend needs KIDO_QEMU, a qemu-system-aarch64" >&2
   exit 2
 fi
 export KIDO_HOME=$(mktemp -d "${TMPDIR:-/tmp}/kido-e2e.XXXX")

@@ -498,7 +498,7 @@ func processRunning(comm string) bool {
 // runHolder runs `kido-vmm hold-network` in its own session and waits until it has written the
 // network's serialization.
 func runHolder(p netip.Prefix, internal bool, base string) error {
-	vmm := vmmPath()
+	vmm := VMMPath()
 	if vmm == "" {
 		return errors.New("networks need kido-vmm: install it next to kido or in ../libexec/kido (make install does), or set KIDO_VMM")
 	}

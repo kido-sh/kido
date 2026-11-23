@@ -17,6 +17,8 @@ import (
 // HypervisorEntitlement lets a process use Hypervisor.framework; QEMU's HVF accelerator needs it.
 const HypervisorEntitlement = "com.apple.security.hypervisor"
 
+const VirtualizationEntitlement = "com.apple.security.virtualization"
+
 const (
 	lcLoadDylib                = 0xc
 	lcReexportDylib            = 0x8000001f

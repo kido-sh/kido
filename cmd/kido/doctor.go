@@ -18,6 +18,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/kido-sh/kido/internal/imageref"
+	"github.com/kido-sh/kido/internal/runtime"
 	"github.com/kido-sh/kido/internal/setup"
 )
 
@@ -58,7 +59,7 @@ func init() {
 }
 
 func runDoctor(ctx context.Context, args []string) int {
-	fl := ctrFlags("doctor", "\n\nChecks the Mac, QEMU, KIDO_HOME, disk space, the local images and that nothing needs\n"+
+	fl := ctrFlags("doctor", "\n\nChecks the Mac, the VM backend, KIDO_HOME, disk space, the local images and that nothing needs\n"+
 		"Docker, and prints a fix for each problem. Exit status 1 when a check fails.")
 	if err := fl.Parse(args); err != nil {
 		return 125
@@ -69,9 +70,16 @@ func runDoctor(ctx context.Context, args []string) int {
 	}
 
 	home := doctorHome()
-	results := []checkResult{checkAppleSilicon(), checkMacOS(ctx), checkHypervisor(), checkPriority(ctx)}
-	results = append(results, checkQEMU(ctx, home)...)
-	results = append(results, checkHome(home), checkDiskSpace(home), checkImages(home), checkDocker())
+	backend, berr := runtime.BackendFromEnv()
+	results := []checkResult{checkAppleSilicon(), checkMacOS(ctx, backend), checkHypervisor(), checkBackend(backend, berr)}
+	switch backend {
+	case "qemu":
+		results = append(results, checkPriority(ctx))
+		results = append(results, checkQEMU(ctx, home)...)
+	case "vz":
+		results = append(results, checkVMM())
+	}
+	results = append(results, checkHome(home, backend), checkDiskSpace(home), checkImages(home), checkDocker())
 
 	fmt.Println("kido", version)
 	failed, warned := 0, 0
@@ -145,7 +153,7 @@ func checkAppleSilicon() checkResult {
 	return pass(name, chip)
 }
 
-func checkMacOS(ctx context.Context) checkResult {
+func checkMacOS(ctx context.Context, backend string) checkResult {
 	const name = "macOS"
 	// An empty environment: SYSTEM_VERSION_COMPAT=1 would make sw_vers report a compatibility version.
 	out, err := runFixed(ctx, []string{}, "/usr/bin/sw_vers")
@@ -168,10 +176,40 @@ func checkMacOS(ctx context.Context) checkResult {
 		return warn(name, "cannot parse the version: "+strings.TrimSpace(out), "")
 	}
 	if major < minMacOSMajor {
-		return warn(name, detail+": older than macOS 15, untested",
-			"update to macOS 15 or later; QEMU's HVF backend uses the in-kernel GIC that macOS 15 added")
+		fix := "update to macOS 15 or later"
+		if backend == "qemu" {
+			fix += "; QEMU's HVF backend uses the in-kernel GIC that macOS 15 added"
+		}
+		return warn(name, detail+": older than macOS 15, untested", fix)
 	}
 	return pass(name, detail)
+}
+
+func checkBackend(backend string, err error) checkResult {
+	const name = "Backend"
+	if err != nil {
+		return fail(name, err.Error(), "unset KIDO_BACKEND, or set it to vz or qemu")
+	}
+	if backend == "qemu" {
+		return pass(name, "qemu: QEMU with Hypervisor.framework")
+	}
+	return pass(name, "vz: Virtualization.framework (KIDO_BACKEND=qemu selects QEMU)")
+}
+
+func checkVMM() checkResult {
+	const name = "kido-vmm"
+	p := runtime.VMMPath()
+	if p == "" {
+		return fail(name, "not found next to kido or in ../libexec/kido", "reinstall kido, or set KIDO_VMM to a kido-vmm")
+	}
+	switch ok, err := setup.HasEntitlement(p, setup.VirtualizationEntitlement); {
+	case err != nil:
+		return fail(name, p+": "+err.Error(), "reinstall kido, or set KIDO_VMM to a kido-vmm")
+	case !ok:
+		return fail(name, p+" lacks "+setup.VirtualizationEntitlement+", so Virtualization.framework refuses to start VMs",
+			"reinstall kido, or sign it with `make sign`")
+	}
+	return pass(name, p)
 }
 
 func checkHypervisor() checkResult {
@@ -285,7 +323,7 @@ func checkQEMULibraries(q setup.QEMU) checkResult {
 	return pass(name, "self-contained: nothing outside its directory but system libraries")
 }
 
-func checkHome(home string) checkResult {
+func checkHome(home, backend string) checkResult {
 	const name = "KIDO_HOME"
 	fi, err := os.Stat(home)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -303,7 +341,7 @@ func checkHome(home string) checkResult {
 	if perm := fi.Mode().Perm(); perm&0o077 != 0 {
 		return fail(name, fmt.Sprintf("%s has mode %04o; other users can read container state", home, perm), "chmod 700 "+home)
 	}
-	if len(home) > maxHomeLen {
+	if backend == "qemu" && len(home) > maxHomeLen {
 		return warn(name, fmt.Sprintf("%s is %d characters: kido commit of a running QEMU container needs at most %d (the path of its monitor socket); everything else works",
 			home, len(home), maxHomeLen), "stop a container before committing it, or set KIDO_HOME to a shorter path")
 	}
@@ -394,7 +432,7 @@ func firstLine(s string) string {
 // registry commands would call (they read Docker's config.json) but cannot find.
 func checkDocker() checkResult {
 	const name = "Docker-free"
-	detail := "no Docker daemon or VM needed: containers run on QEMU, images live in KIDO_HOME"
+	detail := "no Docker daemon or Docker VM needed: each container is its own VM, and images live in KIDO_HOME"
 	dir := os.Getenv("DOCKER_CONFIG")
 	if dir == "" {
 		uh, err := os.UserHomeDir()
