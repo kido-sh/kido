@@ -135,9 +135,9 @@ func TestMergeEnvHidesValues(t *testing.T) {
 
 func TestListenHost(t *testing.T) {
 	if got := listenHost("10.0.2.15"); got != "10.0.2.15" {
-		t.Fatalf("pd_ip 10.0.2.15: %s", got)
+		t.Fatalf("kido_ip 10.0.2.15: %s", got)
 	}
 	if got := listenHost(""); got != "0.0.0.0" {
-		t.Fatalf("no pd_ip: %s", got)
+		t.Fatalf("no kido_ip: %s", got)
 	}
 }

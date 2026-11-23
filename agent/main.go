@@ -108,7 +108,7 @@ type bootConfig struct {
 	port   int
 }
 
-// listenHost is the guest's own address from pd_ip. Bound there, the agent gets the host's
+// listenHost is the guest's own address from kido_ip. Bound there, the agent gets the host's
 // connections even if a guest user holds the wildcard address on the agent port: only root may bind
 // a specific address below 1024, and the specific socket wins over the wildcard one.
 func listenHost(ip string) string {
@@ -116,7 +116,7 @@ func listenHost(ip string) string {
 		return "0.0.0.0"
 	}
 	if a := net.ParseIP(ip); a == nil || a.To4() == nil {
-		log.Fatalf("pd_ip=%q is not an IPv4 address", ip)
+		log.Fatalf("kido_ip=%q is not an IPv4 address", ip)
 	}
 	return ip
 }
@@ -133,8 +133,8 @@ func listenWhenUp(addr string) (net.Listener, error) {
 	}
 }
 
-// bootArgs reads kido_key, kido_secret, pd_ip and kido_port from kern.bootargs; the port defaults to
-// proto.DefaultPort.
+// bootArgs reads kido_key, kido_secret, kido_ip and kido_port from kern.bootargs; the port
+// defaults to proto.DefaultPort.
 func bootArgs() bootConfig {
 	c := bootConfig{port: proto.DefaultPort}
 	args, err := unix.Sysctl("kern.bootargs")
@@ -151,7 +151,7 @@ func bootArgs() bootConfig {
 			c.key = v
 		case "kido_secret":
 			c.secret = v
-		case "pd_ip":
+		case "kido_ip":
 			c.ip = v
 		case "kido_port":
 			if p, err := strconv.Atoi(v); err == nil && p > 0 && p < 65536 {

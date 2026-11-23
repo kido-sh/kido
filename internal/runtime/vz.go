@@ -118,7 +118,7 @@ func vzNetworkSupported(info *Info) error {
 type vzNetwork struct {
 	Guest, Gateway netip.Addr
 	MAC            string
-	Mask           string // pd_mask; empty on vmnet's NAT network
+	Mask           string // kido_mask; empty on vmnet's NAT network
 }
 
 func vzMAC(a netip.Addr) string {
@@ -186,7 +186,7 @@ func addAddr(a netip.Addr, n uint32) netip.Addr {
 	return netip.AddrFrom4([4]byte(binary.BigEndian.AppendUint32(nil, binary.BigEndian.Uint32(b[:])+n)))
 }
 
-// vzAddress gives the container a static NAT address, since the guest takes it from pd_ip. A
+// vzAddress gives the container a static NAT address, since the guest takes it from kido_ip. A
 // container keeps its address while no running container holds it. A new one starts at a hash of
 // the ID in the upper half of the subnet, away from vmnet's DHCP pool (it grows from .2), and
 // skips addresses of running vz containers and of the host's DHCP leases.
@@ -313,14 +313,14 @@ func (r *Runtime) vzBoot(ctx context.Context, info *Info) error {
 	}
 	defer vlog.Close()
 
-	netArgs := []string{"pd_ip=" + nw.Guest.String(), "pd_gw=" + nw.Gateway.String(), "pd_dns=" + nw.Gateway.String()}
+	netArgs := []string{"kido_ip=" + nw.Guest.String(), "kido_gw=" + nw.Gateway.String(), "kido_dns=" + nw.Gateway.String()}
 	if nw.Mask != "" {
-		netArgs = append(netArgs, "pd_mask="+nw.Mask)
+		netArgs = append(netArgs, "kido_mask="+nw.Mask)
 	}
 	bootArgs := strings.Join(slices.Concat([]string{
-		"serial=3", "pd_rtc_wait=5", "pd_rtc_delay=0", "pd_quiet_wait=0",
+		"serial=3", "kido_rtc_wait=5", "kido_rtc_delay=0", "kido_quiet_wait=0",
 		"ext4-uuid=" + info.RootUUID,
-		"pdtime=" + strconv.FormatInt(time.Now().Unix(), 10),
+		"kido_time=" + strconv.FormatInt(time.Now().Unix(), 10),
 	}, netArgs, authArgs), " ")
 	// kido-vmm reads and deletes this file, which keeps the credential out of its argv.
 	if err := os.WriteFile(filepath.Join(dir, "boot-args"), []byte(bootArgs), 0o600); err != nil {

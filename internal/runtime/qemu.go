@@ -312,10 +312,10 @@ func (r *Runtime) boot(ctx context.Context, info *Info) error {
 		netdev += fmt.Sprintf(",hostfwd=%s:%s:%d-:%d", p.Protocol, p.HostIP, p.HostPort, p.GuestPort)
 	}
 	bootArgs := strings.Join(append([]string{
-		"serial=3", "pd_rtc_wait=5", "pd_rtc_delay=0", "pd_quiet_wait=0",
+		"serial=3", "kido_rtc_wait=5", "kido_rtc_delay=0", "kido_quiet_wait=0",
 		"ext4-uuid=" + info.RootUUID,
-		"pd_ip=10.0.2.15", "pd_gw=10.0.2.2", "pd_dns=10.0.2.3",
-		"pdtime=" + strconv.FormatInt(time.Now().Unix(), 10),
+		"kido_ip=10.0.2.15", "kido_gw=10.0.2.2", "kido_dns=10.0.2.3",
+		"kido_time=" + strconv.FormatInt(time.Now().Unix(), 10),
 	}, authArgs...), " ")
 	// The boot-args hold the boot secret: QEMU reads them from a 0600 file, never from its argv.
 	if len(bootArgs) > 1023 || strings.ContainsAny(bootArgs, "\"\n") {

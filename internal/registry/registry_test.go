@@ -274,12 +274,12 @@ func TestCheckManifestRejects(t *testing.T) {
 }
 
 func TestImageConfigRootUUID(t *testing.T) {
-	if _, err := parseImageConfig([]byte(`{"rootUUID":"0b5c5a59-3d0e-4c8a-9a51-6a3e3f0f3d11 pd_ip=1.2.3.4"}`)); err == nil {
+	if _, err := parseImageConfig([]byte(`{"rootUUID":"0b5c5a59-3d0e-4c8a-9a51-6a3e3f0f3d11 kido_ip=1.2.3.4"}`)); err == nil {
 		t.Fatal("accepted a rootUUID with extra boot-args")
 	}
 	// The struct decoder takes the last of two keys that differ in case; the local copy must keep
 	// only the value that was validated, whatever order a later decoder sees.
-	c, err := parseImageConfig([]byte(`{"rootuuid":"x pd_ip=6.6.6.6","rootUUID":"0b5c5a59-3d0e-4c8a-9a51-6a3e3f0f3d11"}`))
+	c, err := parseImageConfig([]byte(`{"rootuuid":"x kido_ip=6.6.6.6","rootUUID":"0b5c5a59-3d0e-4c8a-9a51-6a3e3f0f3d11"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -288,7 +288,7 @@ func TestImageConfigRootUUID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(out), "pd_ip") {
+	if strings.Contains(string(out), "kido_ip") {
 		t.Fatalf("local image.json keeps the unvalidated key: %s", out)
 	}
 }
