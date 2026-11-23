@@ -35,13 +35,15 @@ func (j *imageJSON) image() *engine.Image {
 	return &engine.Image{Name: j.Name, Tag: j.Tag, Created: j.Created, Size: j.Size, RootUUID: j.RootUUID, Parent: j.Parent, Config: j.Config}
 }
 
+var ErrNoImage = errors.New("no such image")
+
 func (r *Runtime) imagesDir() string { return filepath.Join(r.Home, "images") }
 
 func (r *Runtime) loadImage(ref imageref.Ref) (*imageJSON, error) {
 	b, err := os.ReadFile(filepath.Join(ref.Dir(r.Home), "image.json"))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, fmt.Errorf("no such image: %s", ref)
+			return nil, fmt.Errorf("%w: %s", ErrNoImage, ref)
 		}
 		return nil, err
 	}

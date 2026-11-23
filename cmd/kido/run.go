@@ -117,14 +117,18 @@ func ctrRunOrCreate(ctx context.Context, cmdName string, args []string) int {
 	network := fs.String("network", "", "a network from 'kido network create' (vz backend), or none: no outside access (published ports still work)")
 	memory := fs.String("memory", "", "memory in MB, or with an m/g suffix (default 1024)")
 	fs.StringVar(memory, "m", "", "memory (same as --memory)")
+	pull := fs.String("pull", "missing", `pull the image before running ("missing" or "never")`)
 	mounts := ctrMountFlags(fs)
-	valued := []string{"name", "e", "env", "p", "publish", "w", "workdir", "u", "user", "cpus", "memory", "m", "entrypoint", "v", "volume", "mount", "env-file"}
+	valued := []string{"name", "e", "env", "p", "publish", "w", "workdir", "u", "user", "cpus", "memory", "m", "entrypoint", "v", "volume", "mount", "env-file", "pull"}
 	if err := fs.Parse(ctrExpand(args, "itd", valued...)); err != nil {
 		return 125
 	}
 	if fs.NArg() < 1 {
 		fs.Usage()
 		return 125
+	}
+	if err := checkPullPolicy(*pull); err != nil {
+		return ctrFail(err)
 	}
 	fileEnv, err := ctrReadEnvFiles(envFiles)
 	if err != nil {
@@ -149,7 +153,7 @@ func ctrRunOrCreate(ctx context.Context, cmdName string, args []string) int {
 	if err != nil {
 		return ctrFail(err)
 	}
-	img, err := rt.Image(ctx, opts.Image)
+	img, err := imageOrPull(ctx, rt, opts.Image, *pull, os.Stderr)
 	if err != nil {
 		return ctrFail(err)
 	}

@@ -21,8 +21,8 @@ func init() {
 
 const buildUsage = `[OPTIONS] PATH
 
-Runs in a build VM started from the FROM image.
-Instructions: FROM (one local image; no scratch, no multi-stage), RUN, COPY, ADD, ENV, ARG,
+Runs in a build VM started from the FROM image. kido pulls that image first if it is not here.
+Instructions: FROM (one image; no scratch, no multi-stage), RUN, COPY, ADD, ENV, ARG,
 WORKDIR, USER, CMD, ENTRYPOINT, LABEL, EXPOSE (kept in the kido.expose label).
 COPY and ADD read from PATH only and honour .dockerignore. ADD takes local files only:
 URLs are refused, and a local tar archive is copied as a file, not unpacked.
@@ -68,7 +68,7 @@ func buildMain(ctx context.Context, args []string) int {
 	quiet := fs.Bool("q", false, "suppress the build output and print the image ID on success")
 	fs.BoolVar(quiet, "quiet", false, "suppress the build output and print the image ID on success")
 	fs.Bool("no-cache", false, "accepted for Docker compatibility: kido has no build cache, every step runs")
-	fs.Bool("pull", false, "accepted for Docker compatibility: FROM uses the local image (see kido pull)")
+	fs.Bool("pull", false, "accepted for Docker compatibility: kido pulls a missing FROM image but does not look for a newer one")
 	cpus := fs.Int("cpus", 0, "virtual CPUs of the build VM (default 2)")
 	memory := fs.String("memory", "", "memory of the build VM in MB, or with an m/g suffix (default 1024)")
 	fs.StringVar(memory, "m", "", "memory of the build VM (same as --memory)")
@@ -130,6 +130,11 @@ func buildMain(ctx context.Context, args []string) int {
 	rt, err := runtime.New(runtime.DefaultHome())
 	if err != nil {
 		return buildFail(err)
+	}
+	progress := regProgress(*quiet)
+	opts.Pull = func(ctx context.Context, name string) error {
+		_, err := imageOrPull(ctx, rt, name, "missing", progress)
+		return err
 	}
 	// Ctrl-C or a closed terminal cancels the build, which still removes the build container
 	// (main already does this for SIGTERM).

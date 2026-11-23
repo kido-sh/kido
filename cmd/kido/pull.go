@@ -2,10 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 
+	"github.com/kido-sh/kido/internal/engine"
+	"github.com/kido-sh/kido/internal/imageref"
 	"github.com/kido-sh/kido/internal/registry"
 	"github.com/kido-sh/kido/internal/runtime"
 )
@@ -44,6 +48,41 @@ func regPull(ctx context.Context, args []string) int {
 	fmt.Fprintln(os.Stderr, "Digest:", digest)
 	fmt.Println(ref)
 	return 0
+}
+
+func checkPullPolicy(policy string) error {
+	if policy != "missing" && policy != "never" {
+		return fmt.Errorf("invalid --pull value %q: kido supports missing and never", policy)
+	}
+	return nil
+}
+
+func imageOrPull(ctx context.Context, rt *runtime.Runtime, name, policy string, progress io.Writer) (*engine.Image, error) {
+	img, err := rt.Image(ctx, name)
+	if policy == "never" || !errors.Is(err, runtime.ErrNoImage) {
+		return img, err
+	}
+	ref, err := imageref.Parse(name)
+	if err != nil {
+		return nil, err
+	}
+	if progress != nil {
+		fmt.Fprintf(progress, "Unable to find image '%s' locally\n", ref)
+	}
+	pullCtx, stop := signal.NotifyContext(ctx, os.Interrupt)
+	defer stop()
+	_, digest, err := registry.Pull(pullCtx, registry.PullOptions{Home: rt.Home, Remote: ref.String(), Progress: progress})
+	if err != nil {
+		if img, ierr := rt.Image(ctx, name); ierr == nil {
+			return img, nil
+		}
+		return nil, fmt.Errorf("pull %s: %s", ref, registry.Sanitize(err.Error()))
+	}
+	if progress != nil {
+		fmt.Fprintln(progress, "Digest:", digest)
+		fmt.Fprintf(progress, "Status: Downloaded newer image for %s\n", ref)
+	}
+	return rt.Image(ctx, name)
 }
 
 // regImageInUse refuses to replace an image that backs a container's disk.

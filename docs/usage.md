@@ -57,6 +57,9 @@ build on it with `FROM darwin`.
     kido pull ghcr.io/kido-sh/darwin:26.5             # stored as ghcr.io/kido-sh/darwin:26.5
     kido pull ghcr.io/kido-sh/darwin:26.5 darwin:26.5 # stored as darwin:26.5
 
+Like Docker, `kido run`, `kido create` and `kido build` pull an image first if it is not here.
+`--pull never` turns this off for `run` and `create`.
+
 A base image can also be a directory. It holds `disk.img` (a raw GPT disk with an EFI partition
 and an ext4 root), `kernel` (the loader, built as an arm64 Linux kernel image), `initrd.cpio` (the
 kernel collection) and `image.json` (with the root file system's `"rootUUID"`).
@@ -147,14 +150,14 @@ files. They are not live bind mounts, and they need the QEMU backend.
 
 | Command | What it does |
 |---|---|
-| `run` | Create a container from an image and run a command in it (`-it --rm -d --name -e --env-file -w -u -p -v --mount --network --cpus -m --entrypoint`) |
+| `run` | Create a container from an image and run a command in it (`-it --rm -d --name -e --env-file -w -u -p -v --mount --network --cpus -m --entrypoint --pull`) |
 | `create`, `start`, `stop`, `restart`, `kill`, `wait` | Container lifecycle, as in Docker (`start -a -i`, `kill -s`). `stop` and `restart` send SIGTERM to the main process, wait `-t` seconds (default 10), then send SIGKILL. Only then do they copy `-v` mounts back and power off |
 | `exec` | Run a command in a running container (`-it -d -e --env-file -w -u`) |
 | `top` | Run `ps` in the container's VM (`ps -ef` by default, or the `ps` options given after the container) |
 | `export` | Write a container's file system as a tar archive (`-o FILE`, or stdout). A stopped container boots without its command for this. Sockets and device nodes are skipped with a warning |
 | `cp` | Copy files between a container and the host (`SRC CONTAINER:DST`, `CONTAINER:SRC DST`) |
 | `ps`, `logs`, `inspect`, `port`, `rename`, `rm` | List, read the output (`logs --console`: the serial console; `--tail`), inspect (JSON), ports, rename, remove |
-| `build` | Build an image from a Dockerfile: FROM, RUN, COPY, ADD (local files only, archives not unpacked), ENV, ARG, WORKDIR, USER, ENTRYPOINT, CMD, LABEL, EXPOSE. No SHELL and no multi-stage builds. `-q` prints only the image ID. `--no-cache` and `--pull` are accepted, but kido has no build cache and FROM uses the local image |
+| `build` | Build an image from a Dockerfile: FROM, RUN, COPY, ADD (local files only, archives not unpacked), ENV, ARG, WORKDIR, USER, ENTRYPOINT, CMD, LABEL, EXPOSE. No SHELL and no multi-stage builds. `-q` prints only the image ID. `--no-cache` and `--pull` are accepted, but kido has no build cache and does not look for a newer FROM image |
 | `commit` | Create an image from a container's disk |
 | `images`, `rmi`, `tag`, `save`, `load` | List, remove and tag images; save them to and load them from an OCI-layout tar archive |
 | `history` | An image's parent chain: ID, created, created-by and comment when recorded, size (`-H --no-trunc -q --format`) |

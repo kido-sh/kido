@@ -33,6 +33,7 @@ type Options struct {
 	MemoryMB   int
 	Stdout     io.Writer
 	Stderr     io.Writer
+	Pull       func(ctx context.Context, name string) error // nil: FROM uses local images only
 }
 
 // StepError is a RUN step that exited with a non-zero status.
@@ -495,6 +496,19 @@ func (b *builder) arg(s *step) error {
 	return nil
 }
 
+func (b *builder) localImage(ctx context.Context, ref imageref.Ref) (*engine.Image, error) {
+	images, err := b.eng.Images(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, img := range images {
+		if img.Name == ref.Name && img.Tag == ref.Tag {
+			return img, nil
+		}
+	}
+	return nil, nil
+}
+
 func (b *builder) from(ctx context.Context, s *step) error {
 	b.inStage = true
 	if p, ok := s.flags["platform"]; ok {
@@ -520,18 +534,20 @@ func (b *builder) from(ctx context.Context, s *step) error {
 	if ref == b.target {
 		return fmt.Errorf("the image being built, %s, is also its base image: choose another -t", ref)
 	}
-	images, err := b.eng.Images(ctx)
+	base, err := b.localImage(ctx, ref)
 	if err != nil {
 		return err
 	}
-	var base *engine.Image
-	for _, img := range images {
-		if img.Name == ref.Name && img.Tag == ref.Tag {
-			base = img
+	if base == nil && b.opts.Pull != nil {
+		if err := b.opts.Pull(ctx, ref.String()); err != nil {
+			return err
+		}
+		if base, err = b.localImage(ctx, ref); err != nil {
+			return err
 		}
 	}
 	if base == nil {
-		return fmt.Errorf("image %s not found: kido build uses local images only", ref)
+		return fmt.Errorf("image %s not found", ref)
 	}
 	// Other tools write image configs too; a bad user or directory must not reach the guest helpers.
 	if u := base.Config.User; u != "" && !ownerRE.MatchString(u) {
