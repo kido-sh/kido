@@ -1,0 +1,49 @@
+[package]
+name = "kido-kl"
+description = "kl, the system package manager of KidoDarwin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lib]
+name = "kl"
+path = "src/lib.rs"
+
+[[bin]]
+name = "kl"
+path = "src/main.rs"
+
+[[bin]]
+name = "kl-repo"
+path = "src/bin/kl-repo.rs"
+required-features = ["publisher"]
+
+[features]
+default = ["publisher"]
+publisher = ["dep:zstd", "dep:goblin"]
+
+[dependencies]
+kido-trust.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
+time.workspace = true
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+ruzstd = "0.8"
+tar = { version = "0.4", default-features = false }
+ureq = "2"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pemfile = "2"
+zstd = { version = "0.13", optional = true }
+goblin = { version = "0.9", optional = true, default-features = false, features = ["std", "mach32", "mach64"] }
+
+[dev-dependencies]
+tempfile = "3"
+zstd = "0.13"
+
+[lints]
+workspace = true
