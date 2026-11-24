@@ -104,6 +104,13 @@ encrypted and authenticated channel. [docs/security.md](docs/security.md) explai
 
 kido is experimental. Commands and the image format may still change.
 
+## System libraries
+
+The base image is kept small. kl, KidoDarwin's package manager, will install the other system
+libraries and frameworks where macOS keeps them, so `kl add libsqlite3` fixes a `Library not loaded`
+for `/usr/lib/libsqlite3.dylib`. kl is still being built, and its repository is not online yet.
+[docs/kl.md](docs/kl.md) describes how it works.
+
 ## Troubleshooting
 
 Run `kido doctor`. Every failed check prints its fix.
