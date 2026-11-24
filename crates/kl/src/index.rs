@@ -12,6 +12,8 @@ pub struct Package {
     pub license: String,
     pub blob: BlobRef,
     pub installed_size: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunks: Option<BlobRef>,
     #[serde(default)]
     pub provides: Vec<String>,
     #[serde(default)]
@@ -37,6 +39,11 @@ impl Index {
         for p in &index.packages {
             check_name(&p.name)?;
             ensure!(valid_sha256(&p.blob.sha256), "{} has a bad sha256", p.name);
+            ensure!(
+                p.chunks.as_ref().is_none_or(|c| valid_sha256(&c.sha256)),
+                "{} has a bad chunk list sha256",
+                p.name
+            );
             ensure!(names.insert(p.name.as_str()), "{} is listed twice", p.name);
         }
         Ok(index)

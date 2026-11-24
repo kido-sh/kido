@@ -248,6 +248,81 @@ fn refuses_a_package_that_unpacks_cleanly_but_has_another_hash() {
     nothing_installed(&w.path("root"));
 }
 
+fn pack_big(w: &World) -> kl::index::Package {
+    let from = w.path("bigtree");
+    fs::create_dir_all(from.join("usr/share/big")).unwrap();
+    let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+    let bytes: Vec<u8> = (0..9 << 20)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x.to_le_bytes()[0]
+        })
+        .collect();
+    fs::write(from.join("usr/share/big/blob.bin"), bytes).unwrap();
+    w.repo(&[
+        "pack",
+        "--arch",
+        "arm64e",
+        "--from",
+        from.to_str().unwrap(),
+        "--name",
+        "big",
+        "--version",
+        "1",
+        "--license",
+        "MIT",
+        "usr/share/big",
+    ]);
+    serde_json::from_slice(&fs::read(w.path("repo/latest/arm64e/packages.d/big.json")).unwrap())
+        .unwrap()
+}
+
+#[test]
+fn installs_a_large_package_chunk_by_chunk() {
+    let w = World::new();
+    let entry = pack_big(&w);
+    assert!(entry.blob.size > 2 * kido_trust::CHUNK_SIZE);
+    assert!(
+        entry.chunks.is_some(),
+        "a large blob should list chunk hashes"
+    );
+    w.publish(1, None, "signer");
+    ok(&w.kl(&["add", "big"]));
+    assert_eq!(
+        fs::read(w.path("root/usr/share/big/blob.bin"))
+            .unwrap()
+            .len(),
+        9 << 20
+    );
+}
+
+#[test]
+fn stops_at_the_first_tampered_chunk() {
+    let w = World::new();
+    let entry = pack_big(&w);
+    w.publish(1, None, "signer");
+    let blob = w.path("repo/blobs/sha256").join(&entry.blob.sha256);
+    let mut bytes = fs::read(&blob).unwrap();
+    bytes[usize::try_from(kido_trust::CHUNK_SIZE).unwrap() + 10] ^= 1;
+    fs::write(&blob, bytes).unwrap();
+    fails_with(&w.kl(&["add", "big"]), "chunk 1 of the blob does not match");
+    nothing_installed(&w.path("root"));
+}
+
+#[test]
+fn refuses_a_large_package_without_chunk_hashes() {
+    let w = World::new();
+    let mut entry = pack_big(&w);
+    entry.chunks = None;
+    let path = w.path("repo/latest/arm64e/packages.d/big.json");
+    fs::write(&path, serde_json::to_vec(&entry).unwrap()).unwrap();
+    w.publish(1, None, "signer");
+    fails_with(&w.kl(&["add", "big"]), "lists no chunk hashes");
+    nothing_installed(&w.path("root"));
+}
+
 #[test]
 fn refuses_a_signature_from_another_key() {
     let w = World::new();
@@ -329,6 +404,7 @@ fn publish_evil(w: &World, manifest: &Manifest, blob: &[u8]) {
         license: "MIT".into(),
         blob: blob_ref,
         installed_size: 1 << 20,
+        chunks: None,
         provides: vec![],
         depends: vec![],
     };

@@ -3,7 +3,7 @@ use crate::index::{Index, Package};
 use crate::manifest::{FileEntry, Kind, MANIFEST_LIMIT, MANIFEST_PATH, Manifest};
 use crate::repo::Repo;
 use anyhow::{Context, Result, anyhow, bail, ensure};
-use kido_trust::{BlobRef, HashingReader};
+use kido_trust::{BlobRef, CHUNK_SIZE, ChunkList, ChunkReader, HashingReader};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -77,6 +77,7 @@ pub fn installed_index(installed: &BTreeMap<String, Installed>, arch: &str) -> I
                 license: i.manifest.license.clone(),
                 blob: i.blob.clone(),
                 installed_size: i.manifest.file_bytes(),
+                chunks: None,
                 provides: i.manifest.provides.clone(),
                 depends: i.manifest.depends.clone(),
             })
@@ -128,13 +129,30 @@ pub fn sync(
 pub fn stage(repo: &Repo, pkg: &Package, arch: &str, staging: &Path) -> Result<Manifest> {
     let dir = staging.join(&pkg.name);
     fs::create_dir_all(&dir)?;
+    let chunks = chunk_list(repo, pkg)?;
     let raw = repo.open(&format!("blobs/sha256/{}", pkg.blob.sha256))?;
-    let mut blob = HashingReader::new(raw, pkg.blob.size);
+    let mut blob = ChunkReader::new(raw, chunks, &pkg.blob);
     let manifest =
         unpack(&mut blob, pkg, arch, &dir).with_context(|| format!("unpack {}", pkg.name))?;
     blob.finish(&pkg.blob)
         .with_context(|| format!("verify {}", pkg.name))?;
     Ok(manifest)
+}
+
+fn chunk_list(repo: &Repo, pkg: &Package) -> Result<ChunkList> {
+    let Some(list_ref) = &pkg.chunks else {
+        ensure!(
+            pkg.blob.size <= CHUNK_SIZE,
+            "{} is larger than one chunk but lists no chunk hashes",
+            pkg.name
+        );
+        return Ok(ChunkList::whole(&pkg.blob));
+    };
+    let bytes = repo.read(&format!("blobs/sha256/{}", list_ref.sha256), 4 << 20)?;
+    list_ref.check(&bytes)?;
+    let list: ChunkList = serde_json::from_slice(&bytes)?;
+    list.validate(&pkg.blob)?;
+    Ok(list)
 }
 
 fn unpack(blob: &mut impl Read, pkg: &Package, arch: &str, dir: &Path) -> Result<Manifest> {

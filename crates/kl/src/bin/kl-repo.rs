@@ -148,12 +148,21 @@ fn pack(cli: &Cli, a: &PackArgs<'_>) -> Result<()> {
     let blobs = cli.repo.join("blobs/sha256");
     fs::create_dir_all(&blobs)?;
     fs::write(blobs.join(&blob_ref.sha256), &blob)?;
+    let chunks = if blob.len() as u64 > kido_trust::CHUNK_SIZE {
+        let list = serde_json::to_vec(&kido_trust::ChunkList::of(&blob, kido_trust::CHUNK_SIZE))?;
+        let list_ref = BlobRef::of(&list);
+        fs::write(blobs.join(&list_ref.sha256), &list)?;
+        Some(list_ref)
+    } else {
+        None
+    };
     let package = Package {
         name: manifest.name.clone(),
         version: manifest.version.clone(),
         summary: manifest.summary.clone(),
         license: manifest.license.clone(),
         installed_size: manifest.file_bytes(),
+        chunks,
         provides: manifest.provides.clone(),
         depends: manifest.depends.clone(),
         blob: blob_ref,
