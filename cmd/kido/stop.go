@@ -29,6 +29,7 @@ func ctrStop(ctx context.Context, args []string) int {
 	code := 0
 	for _, ref := range fs.Args() {
 		var err error
+		ctrMarkStopped(rt, ref)
 		if *secs <= 0 {
 			err = rt.Kill(ctx, ref)
 		} else {

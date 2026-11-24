@@ -104,6 +104,9 @@ type Info struct {
 	Main       *Process             `json:"main,omitempty"`
 	Detached   bool                 `json:"detached,omitempty"`
 	AutoRemove bool                 `json:"autoRemove,omitempty"`
+	Restart    string               `json:"restart,omitempty"` // policy: always, unless-stopped or on-failure[:N]
+	Restarts   int                  `json:"restartCount,omitempty"`
+	UserStop   bool                 `json:"userStopped,omitempty"` // kido stop or kill: no restart until a kido start
 	Backend    string               `json:"backend,omitempty"`
 	AgentPort  int                  `json:"agentPort,omitempty"`
 	PID        int                  `json:"pid,omitempty"`

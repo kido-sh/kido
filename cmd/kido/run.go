@@ -118,8 +118,9 @@ func ctrRunOrCreate(ctx context.Context, cmdName string, args []string) int {
 	memory := fs.String("memory", "", "memory in MB, or with an m/g suffix (default 1024)")
 	fs.StringVar(memory, "m", "", "memory (same as --memory)")
 	pull := fs.String("pull", "missing", `pull the image before running ("missing" or "never")`)
+	restart := fs.String("restart", "no", "restart the main process when it exits: no, on-failure[:max-retries], always or unless-stopped (needs -d)")
 	mounts := ctrMountFlags(fs)
-	valued := []string{"name", "e", "env", "p", "publish", "w", "workdir", "u", "user", "cpus", "memory", "m", "entrypoint", "v", "volume", "mount", "env-file", "pull"}
+	valued := []string{"name", "e", "env", "p", "publish", "w", "workdir", "u", "user", "cpus", "memory", "m", "entrypoint", "v", "volume", "mount", "env-file", "pull", "restart"}
 	if err := fs.Parse(ctrExpand(args, "itd", valued...)); err != nil {
 		return 125
 	}
@@ -129,6 +130,16 @@ func ctrRunOrCreate(ctx context.Context, cmdName string, args []string) int {
 	}
 	if err := checkPullPolicy(*pull); err != nil {
 		return ctrFail(err)
+	}
+	policy, err := ctrRestartPolicy(*restart)
+	if err != nil {
+		return ctrFail(err)
+	}
+	if policy != "" && *autoRemove {
+		return ctrFail(errors.New("--restart and --rm cannot be used together"))
+	}
+	if policy != "" && !*detach && !create {
+		return ctrFail(errors.New("--restart needs -d"))
 	}
 	fileEnv, err := ctrReadEnvFiles(envFiles)
 	if err != nil {
@@ -185,7 +196,7 @@ func ctrRunOrCreate(ctx context.Context, cmdName string, args []string) int {
 	stopBoot()
 	if c != nil {
 		rt.Update(c.ID, func(i *runtime.Info) {
-			i.Main, i.Detached, i.AutoRemove = mainProc, *detach, *autoRemove
+			i.Main, i.Detached, i.AutoRemove, i.Restart = mainProc, *detach, *autoRemove, policy
 		})
 	}
 	if err != nil {
@@ -287,18 +298,36 @@ func ctrAttachMain(ctx context.Context, args []string) int {
 		return 125
 	}
 	defer logw.Close()
-	m := info.Main
-	p := engine.ProcessSpec{Args: m.Args, Env: m.Env, Dir: m.Dir, User: m.User, TTY: m.TTY}
-	stdio := engine.Stdio{Stdout: logw, Stderr: logw}
-	vmPID := rt.VMPID(info.ID)
-	status, execErr := rt.ExecNotify(context.Background(), info.ID, p, stdio, func(pid int) {
-		rt.SetOwner(info.ID, pid)
-		say("ok")
-	})
-	if execErr != nil && !(reported && rt.StoppedByOthers(info.ID, vmPID, 2*time.Second)) {
-		fmt.Fprintln(logw, "kido:", execErr)
-		say("err %d %s", status, strings.ReplaceAll(execErr.Error(), "\n", " "))
+	var delay time.Duration
+	for {
+		m := info.Main
+		p := engine.ProcessSpec{Args: m.Args, Env: m.Env, Dir: m.Dir, User: m.User, TTY: m.TTY}
+		stdio := engine.Stdio{Stdout: logw, Stderr: logw}
+		vmPID := rt.VMPID(info.ID)
+		started := time.Now()
+		status, execErr := rt.ExecNotify(context.Background(), info.ID, p, stdio, func(pid int) {
+			rt.SetOwner(info.ID, pid)
+			say("ok")
+		})
+		if execErr != nil && !(reported && rt.StoppedByOthers(info.ID, vmPID, 2*time.Second)) {
+			fmt.Fprintln(logw, "kido:", execErr)
+			say("err %d %s", status, strings.ReplaceAll(execErr.Error(), "\n", " "))
+		}
+		status = ctrFinish(rt, info.ID, vmPID, status, execErr, info.AutoRemove)
+		if !reported || info.AutoRemove {
+			return 0
+		}
+		delay = ctrRestartDelay(delay, time.Since(started))
+		if !ctrAwaitRestart(rt, info.ID, status, delay, logw) {
+			return 0
+		}
+		if err := rt.Start(context.Background(), info.ID); err != nil {
+			fmt.Fprintln(logw, "kido: restart:", err)
+			return 0
+		}
+		rt.Update(info.ID, func(i *runtime.Info) { i.Restarts++ })
+		if info, err = rt.Get(info.ID); err != nil {
+			return 0
+		}
 	}
-	ctrFinish(rt, info.ID, vmPID, status, execErr, info.AutoRemove)
-	return 0
 }

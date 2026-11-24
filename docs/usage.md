@@ -163,7 +163,7 @@ files. They are not live bind mounts.
 
 | Command | What it does |
 |---|---|
-| `run` | Create a container from an image and run a command in it (`-it --rm -d --name -e --env-file -w -u -p -v --mount --network --cpus -m --entrypoint --pull`) |
+| `run` | Create a container from an image and run a command in it (`-it --rm -d --name -e --env-file -w -u -p -v --mount --network --cpus -m --entrypoint --pull --restart`) |
 | `create`, `start`, `stop`, `restart`, `kill`, `wait` | Container lifecycle (`start -a -i`, `kill -s`). `stop` and `restart` send SIGTERM to the main process, wait `-t` seconds (default 10), then send SIGKILL. Only then do they copy `-v` mounts back and power off |
 | `exec` | Run a command in a running container (`-it -d -e --env-file -w -u`) |
 | `top` | Run `ps` in the container's VM (`ps -ef` by default, or the `ps` options given after the container) |
@@ -187,7 +187,13 @@ files. They are not live bind mounts.
 or `json`). `inspect` templates use kido's field names, such as a container's `{{.ID}}` and
 `{{.State}}`.
 
-Not there yet: `attach`, `stats`, `pause`, `diff`, `logout` and restart policies.
+`--restart` on `run -d` and `create` restarts the container when its main process exits. `always`
+and `unless-stopped` always restart it, and `on-failure[:max-retries]` restarts it after a nonzero
+status. A VM that dies counts as an exit. The wait between restarts doubles from one second up to a minute, and starts over after a run
+of ten seconds. `kido stop` and `kido kill` end the restarts until the next `kido start`. Containers
+do not start again by themselves after the Mac restarts yet. `kido inspect` shows `restartCount`.
+
+Not there yet: `attach`, `stats`, `pause`, `diff` and `logout`.
 
 The exit status is the command's own status, 125 when kido itself fails, and 126 or 127 when the
 guest cannot run or find the program. A failed `kido build` exits with the status of

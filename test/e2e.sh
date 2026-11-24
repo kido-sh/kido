@@ -126,6 +126,10 @@ check  "run -d ignoring TERM"   0 "$kido" run -d --name e2e-i darwin /bin/sh -c 
 check  "stop -t 1 then KILL"    0 "$kido" stop -t 1 e2e-i
 check  "137 after the timeout"  0 sh -c 'test "$("$1" wait e2e-i)" = 137' sh "$kido"
 check  "rm stopped containers"  0 "$kido" rm e2e-s e2e-i
+check  "run -d --restart"       0 "$kido" run -d --name e2e-r --restart on-failure:1 darwin /bin/sh -c 'exit 3'
+check  "one restart, then stop" 0 sh -c 'for i in $(seq 40); do test "$("$1" inspect -f "{{.Restarts}} {{.State}}" e2e-r)" = "1 stopped" && exit 0; sleep 1; done; exit 1' sh "$kido"
+check  "rm restarted container" 0 "$kido" rm e2e-r
+checko "--restart needs -d"   125 "--restart needs -d" "$kido" run --restart always darwin true
 mkdir -p "$KIDO_HOME/vol"
 check  "run -d -v TERM writes"  0 "$kido" run -d --name e2e-v -v "$KIDO_HOME/vol:/data" darwin /bin/sh -c 'trap "echo bye > /data/bye; exit 0" TERM; while :; do sleep 0.1; done'
 check  "stop collects after TERM" 0 "$kido" stop e2e-v

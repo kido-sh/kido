@@ -77,9 +77,11 @@ func ctrFinish(rt *runtime.Runtime, id string, vmPID, status int, execErr error,
 // ctrStartContainer boots a container once the owner of its previous boot has let go, and starts
 // its main process in the background when it has one.
 func ctrStartContainer(ctx context.Context, rt *runtime.Runtime, id string, spawnMain bool) (int, error) {
+	ctrMarkStopped(rt, id)
 	if err := rt.WaitOwner(ctx, id, 15*time.Second); err != nil {
 		return 125, err
 	}
+	rt.Update(id, func(i *runtime.Info) { i.UserStop, i.Restarts = false, 0 })
 	done := ctrGuard()
 	defer done()
 	bootCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGHUP)
@@ -145,6 +147,7 @@ func ctrKill(ctx context.Context, args []string) int {
 			continue
 		}
 		if sig == syscall.SIGKILL {
+			ctrMarkStopped(rt, info.ID)
 			err = rt.Kill(ctx, info.ID)
 			if err == nil && !rt.OwnerAlive(info.ID) {
 				rt.RecordExit(info.ID, 0, 137, nil)
@@ -184,6 +187,7 @@ func ctrRestart(ctx context.Context, args []string) int {
 			continue
 		}
 		if info.State == engine.StateRunning {
+			ctrMarkStopped(rt, info.ID)
 			if *secs <= 0 {
 				err = rt.Kill(ctx, info.ID)
 			} else {
