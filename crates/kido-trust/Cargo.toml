@@ -1,0 +1,22 @@
+[package]
+name = "kido-trust"
+description = "Signed metadata checks shared by kido's images and kl's packages"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
+time.workspace = true
+ssh-key = { version = "0.6", default-features = false, features = ["std", "ed25519"] }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile = "3"
