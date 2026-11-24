@@ -225,6 +225,141 @@ impl<R: Read> Read for HashingReader<R> {
     }
 }
 
+pub const CHUNK_SIZE: u64 = 4 << 20;
+const CHUNK_MIN: u64 = 64 << 10;
+const CHUNK_MAX: u64 = 16 << 20;
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ChunkList {
+    pub chunk_size: u64,
+    pub chunks: Vec<String>,
+}
+
+impl ChunkList {
+    #[must_use]
+    pub fn of(bytes: &[u8], chunk_size: u64) -> Self {
+        let size = usize::try_from(chunk_size).unwrap_or(usize::MAX);
+        ChunkList {
+            chunk_size,
+            chunks: bytes.chunks(size).map(sha256_hex).collect(),
+        }
+    }
+
+    #[must_use]
+    pub fn whole(blob: &BlobRef) -> Self {
+        ChunkList {
+            chunk_size: blob.size.max(1),
+            chunks: if blob.size == 0 {
+                Vec::new()
+            } else {
+                vec![blob.sha256.clone()]
+            },
+        }
+    }
+
+    pub fn validate(&self, blob: &BlobRef) -> Result<(), Error> {
+        if !(CHUNK_MIN..=CHUNK_MAX).contains(&self.chunk_size) {
+            return Err(Error::Parse(format!(
+                "chunk size {} is out of range",
+                self.chunk_size
+            )));
+        }
+        let want = blob.size.div_ceil(self.chunk_size);
+        if self.chunks.len() as u64 != want {
+            return Err(Error::Parse(format!(
+                "{} chunk hashes for {want} chunks",
+                self.chunks.len()
+            )));
+        }
+        if let Some(bad) = self.chunks.iter().find(|c| !valid_sha256(c)) {
+            return Err(Error::Parse(format!("bad chunk sha256 {bad}")));
+        }
+        Ok(())
+    }
+}
+
+pub struct ChunkReader<R> {
+    inner: R,
+    chunks: Vec<String>,
+    chunk_size: u64,
+    left: u64,
+    next: usize,
+    buf: Vec<u8>,
+    pos: usize,
+    whole: Sha256,
+}
+
+impl<R: Read> ChunkReader<R> {
+    pub fn new(inner: R, list: ChunkList, blob: &BlobRef) -> Self {
+        ChunkReader {
+            inner,
+            chunks: list.chunks,
+            chunk_size: list.chunk_size,
+            left: blob.size,
+            next: 0,
+            buf: Vec::new(),
+            pos: 0,
+            whole: Sha256::new(),
+        }
+    }
+
+    pub fn finish(mut self, blob: &BlobRef) -> Result<(), Error> {
+        io::copy(&mut self, &mut io::sink()).map_err(|e| Error::Parse(e.to_string()))?;
+        let got = hex::encode(self.whole.finalize());
+        if got != blob.sha256 {
+            return Err(Error::Hash {
+                want: blob.sha256.clone(),
+                got,
+            });
+        }
+        Ok(())
+    }
+
+    fn fill(&mut self) -> io::Result<()> {
+        if self.next == self.chunks.len() {
+            let mut extra = [0u8; 1];
+            if self.inner.read(&mut extra)? != 0 {
+                return Err(io::Error::other("the blob is longer than its index entry"));
+            }
+            return Ok(());
+        }
+        let len = usize::try_from(self.chunk_size.min(self.left)).map_err(io::Error::other)?;
+        self.buf.resize(len, 0);
+        self.inner.read_exact(&mut self.buf).map_err(|e| {
+            if e.kind() == io::ErrorKind::UnexpectedEof {
+                io::Error::other("the blob is shorter than its index entry")
+            } else {
+                e
+            }
+        })?;
+        if sha256_hex(&self.buf) != self.chunks[self.next] {
+            return Err(io::Error::other(format!(
+                "chunk {} of the blob does not match its hash",
+                self.next
+            )));
+        }
+        self.whole.update(&self.buf);
+        self.left -= len as u64;
+        self.next += 1;
+        self.pos = 0;
+        Ok(())
+    }
+}
+
+impl<R: Read> Read for ChunkReader<R> {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        if self.pos == self.buf.len() {
+            self.buf.clear();
+            self.pos = 0;
+            self.fill()?;
+        }
+        let n = out.len().min(self.buf.len() - self.pos);
+        out[..n].copy_from_slice(&self.buf[self.pos..self.pos + n]);
+        self.pos += n;
+        Ok(n)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -356,5 +491,85 @@ mod tests {
         assert!(!valid_sha256(&"A".repeat(64)));
         assert!(!valid_sha256(&"a".repeat(63)));
         assert!(!valid_sha256(&format!("../{}", "a".repeat(61))));
+    }
+
+    struct Counting<R> {
+        inner: R,
+        total: usize,
+    }
+
+    impl<R: Read> Read for Counting<R> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let n = self.inner.read(buf)?;
+            self.total += n;
+            Ok(n)
+        }
+    }
+
+    fn data(len: usize) -> Vec<u8> {
+        (0..len)
+            .map(|i| u8::try_from(i * 7 % 251).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn chunk_reader_releases_only_verified_chunks_and_stops_at_the_first_bad_one() {
+        let chunk = 64 << 10;
+        let good = data(3 * chunk + 100);
+        let blob = BlobRef::of(&good);
+        let list = ChunkList::of(&good, chunk as u64);
+        list.validate(&blob).unwrap();
+        let mut out = Vec::new();
+        let mut reader = ChunkReader::new(good.as_slice(), list.clone(), &blob);
+        reader.read_to_end(&mut out).unwrap();
+        assert_eq!(out, good);
+        reader.finish(&blob).unwrap();
+
+        let mut bad = good.clone();
+        bad[chunk + 5] ^= 1;
+        let mut source = Counting {
+            inner: bad.as_slice(),
+            total: 0,
+        };
+        let mut reader = ChunkReader::new(&mut source, list, &blob);
+        let mut out = Vec::new();
+        let err = reader.read_to_end(&mut out).unwrap_err();
+        assert!(err.to_string().contains("chunk 1 of the blob"), "{err}");
+        assert_eq!(out.len(), chunk);
+        drop(reader);
+        assert_eq!(source.total, 2 * chunk);
+    }
+
+    #[test]
+    fn chunk_reader_refuses_short_and_long_blobs_and_bad_lists() {
+        let chunk = 64 << 10;
+        let good = data(2 * chunk);
+        let blob = BlobRef::of(&good);
+        let list = ChunkList::of(&good, chunk as u64);
+        let mut sink = Vec::new();
+        let short = &good[..good.len() - 1];
+        assert!(
+            ChunkReader::new(short, list.clone(), &blob)
+                .read_to_end(&mut sink)
+                .is_err()
+        );
+        let mut long = good.clone();
+        long.push(0);
+        sink.clear();
+        assert!(
+            ChunkReader::new(long.as_slice(), list.clone(), &blob)
+                .read_to_end(&mut sink)
+                .is_err()
+        );
+        let missing = ChunkList {
+            chunk_size: chunk as u64,
+            chunks: list.chunks[..1].to_vec(),
+        };
+        assert!(missing.validate(&blob).is_err());
+        let tiny = ChunkList {
+            chunk_size: 1,
+            chunks: list.chunks.clone(),
+        };
+        assert!(tiny.validate(&blob).is_err());
     }
 }
