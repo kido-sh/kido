@@ -172,6 +172,55 @@ else
   check  "stop copy container"    0 "$kido" stop e2e-cm
   checko "copy: back after stop"  0 "copied" cat "$live/copied"
   check  "rm copy container"      0 "$kido" rm e2e-cm
+  echo before > "$live/pre"
+  check  "run -d notify -v"       0 "$kido" run -d --name e2e-n -v "$live:/data" darwin sleep 600
+  nlog="$KIDO_HOME/containers/$("$kido" inspect -f '{{.ID}}' e2e-n)/notify.log"
+  for i in $(seq 100); do grep -q notifications "$nlog" 2>/dev/null && break; sleep 0.1; done
+  replaced() {
+    echo old > "$live/$1"
+    "$kido" exec e2e-n cat "$2/$1" >/dev/null
+    printf new > "$live/$1.tmp" && mv "$live/$1.tmp" "$live/$1"
+    checko "notify: a replace seen ($1)" 0 "seen" "$kido" exec e2e-n /bin/sh -c \
+      "i=0; while [ \"\$(cat $2/$1)\" != new ]; do i=\$((i+1)); [ \$i -gt 15 ] && exit 1; sleep 0.01; done; echo seen \$i"
+  }
+  if grep -q "notifications stay off" "$nlog" 2>/dev/null; then
+    echo "skip notification checks: the image takes no notifications"
+  else
+    checko "notify: session up"     0 "notifications on" cat "$nlog"
+    for i in 1 2 3; do replaced n$i /data; done
+    check  "notify: umount in use"  0 "$kido" exec e2e-n /sbin/umount /data
+    check  "notify: mount again"    0 "$kido" exec e2e-n /sbin/mount -t virtiofs kido:m0 /data
+    replaced n4 /data
+    check  "notify: mount twice"    0 "$kido" exec e2e-n /bin/sh -c 'mkdir -p /data2 && /sbin/mount -t virtiofs kido:m0 /data2'
+    sleep 1
+    replaced n5 /data2
+    replaced "$(printf 'n\303\251')" /data
+    kq=$KIDO_HOME/kqprobe
+    (cd "$root" && CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -o "$kq" ./test/kqprobe) || exit 1
+    check  "cp kqprobe in"          0 "$kido" cp "$kq" e2e-n:/var/root/kqprobe
+    watched() {
+      rm -f "$KIDO_HOME/kq.out"
+      "$kido" exec e2e-n /var/root/kqprobe "/data/$1" 5 > "$KIDO_HOME/kq.out" 2>&1 &
+      local pid=$!
+      for i in $(seq 100); do grep -q ready "$KIDO_HOME/kq.out" 2>/dev/null && break; sleep 0.05; done
+      eval "$2"
+      wait $pid
+      checko "notify: $3" 0 "$4" cat "$KIDO_HOME/kq.out"
+    }
+    echo one > "$live/w"
+    "$kido" exec e2e-n cat /data/w >/dev/null
+    watched w 'echo two >> "$live/w"' "a watcher woken" "write"
+    watched w 'printf new > "$live/w.tmp" && mv "$live/w.tmp" "$live/w"' "a replace is a deletion" "delete"
+    "$kido" exec e2e-n cat /data/pre >/dev/null
+    watched pre 'printf new > "$live/pre.tmp" && mv "$live/pre.tmp" "$live/pre"' "a first replace too" "delete"
+    cdir=$(dirname "$nlog")
+    check  "notify: relay stopped"  0 pkill -f "__notify $(basename "$cdir")"
+    echo after > "$live/after-stop"
+    sleep 1
+    checko "notify: watch ends too"  0 "once: 1" sh -c 'echo "once: $(grep -c "the relay is gone" "$1")"' sh "$cdir/vmm.log"
+    check  "notify: guest runs on"  0 "$kido" exec e2e-n /bin/test -s /data/after-stop
+  fi
+  check  "rm -f notify container" 0 "$kido" rm -f e2e-n
 fi
 probe=$KIDO_HOME/netprobe
 (cd "$root" && CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -o "$probe" ./test/netprobe) || exit 1
