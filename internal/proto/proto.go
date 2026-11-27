@@ -3,7 +3,8 @@
 // A connection carries one request. After the handshake of auth.go every byte travels in sealed
 // frames (aead.go): the client sends the Request as JSON in a FrameRequest, the agent answers with
 // the Response as JSON in a FrameResponse. For "exec", frames follow in both directions until the
-// agent sends FrameExit and closes the connection.
+// agent sends FrameExit and closes the connection. For "notify", whose Args name the live shares,
+// the client then sends FrameNotify frames until it closes the connection.
 package proto
 
 import (
@@ -26,6 +27,7 @@ const (
 	OpPing     = "ping"
 	OpExec     = "exec"
 	OpShutdown = "shutdown"
+	OpNotify   = "notify"
 )
 
 type Request struct {
@@ -56,6 +58,7 @@ const (
 	FrameResize     byte = 6 // client -> agent: uint16 rows, uint16 cols, big-endian
 	FrameRequest    byte = 7 // client -> agent, first sealed frame: SignedRequest JSON
 	FrameResponse   byte = 8 // agent -> client, first sealed frame: Response JSON
+	FrameNotify     byte = 9 // client -> agent: one share's batch (internal/notify), or empty to keep the session
 )
 
 var ErrFrameTooLarge = errors.New("proto: frame too large")
