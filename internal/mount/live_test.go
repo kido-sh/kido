@@ -39,7 +39,7 @@ func TestLiveSharesDirectoriesOnly(t *testing.T) {
 		engine.Mount{Source: src, Target: "/data"},
 		engine.Mount{Source: file, Target: "/etc/f", ReadOnly: true},
 		engine.Mount{Source: src, Target: "/ro", ReadOnly: true})
-	args, err := VZArgs(dir)
+	args, _, err := VZArgs(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +60,7 @@ func TestLiveSharesDirectoriesOnly(t *testing.T) {
 
 func TestNotLiveCopiesDirectories(t *testing.T) {
 	dir := liveContainer(t, false, engine.Mount{Source: t.TempDir(), Target: "/data"})
-	args, err := VZArgs(dir)
+	args, _, err := VZArgs(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,11 +76,11 @@ func TestLiveSourceMustStayADirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	write(t, src, "now a file")
-	if _, err := VZArgs(dir); err == nil || !strings.Contains(err.Error(), "no longer a directory") {
+	if _, _, err := VZArgs(dir); err == nil || !strings.Contains(err.Error(), "no longer a directory") {
 		t.Fatalf("VZArgs after the source became a file: %v", err)
 	}
 	os.Remove(src)
-	if _, err := VZArgs(dir); err == nil {
+	if _, _, err := VZArgs(dir); err == nil {
 		t.Fatal("VZArgs after the source went away: no error")
 	}
 }
@@ -96,7 +96,7 @@ func TestPopulateMountsLiveShares(t *testing.T) {
 	dir := liveContainer(t, true,
 		engine.Mount{Source: t.TempDir(), Target: "/data"},
 		engine.Mount{Source: t.TempDir(), Target: "/ro", ReadOnly: true})
-	if _, err := VZArgs(dir); err != nil {
+	if _, _, err := VZArgs(dir); err != nil {
 		t.Fatal(err)
 	}
 	var g guestLog
@@ -163,19 +163,19 @@ func TestRedirectedSourceIsRefused(t *testing.T) {
 		engine.Mount{Source: shared, Target: "/app"},
 		engine.Mount{Source: filepath.Join(shared, "conf"), Target: "/conf"},
 		engine.Mount{Source: filepath.Join(shared, "app.conf"), Target: "/etc/app.conf", ReadOnly: true})
-	if _, err := VZArgs(dir); err != nil {
+	if _, _, err := VZArgs(dir); err != nil {
 		t.Fatal(err)
 	}
 	os.Remove(filepath.Join(shared, "conf"))
 	os.Symlink(secret, filepath.Join(shared, "conf"))
-	if _, err := VZArgs(dir); err == nil || !strings.Contains(err.Error(), "now leads to") {
+	if _, _, err := VZArgs(dir); err == nil || !strings.Contains(err.Error(), "now leads to") {
 		t.Fatalf("live source redirected: %v", err)
 	}
 	os.Remove(filepath.Join(shared, "conf"))
 	os.MkdirAll(filepath.Join(shared, "conf"), 0o700)
 	os.Remove(filepath.Join(shared, "app.conf"))
 	os.Symlink(filepath.Join(secret, "key"), filepath.Join(shared, "app.conf"))
-	if _, err := VZArgs(dir); err == nil || !strings.Contains(err.Error(), "now leads to") {
+	if _, _, err := VZArgs(dir); err == nil || !strings.Contains(err.Error(), "now leads to") {
 		t.Fatalf("copied source redirected: %v", err)
 	}
 }
@@ -219,7 +219,7 @@ func TestPopulateCopiesBeforeLive(t *testing.T) {
 	dir := liveContainer(t, true,
 		engine.Mount{Source: t.TempDir(), Target: "/data"},
 		engine.Mount{Source: file, Target: "/etc/f", ReadOnly: true})
-	if _, err := VZArgs(dir); err != nil {
+	if _, _, err := VZArgs(dir); err != nil {
 		t.Fatal(err)
 	}
 	st, _ := load(dir)
@@ -262,7 +262,7 @@ func TestQEMURefusesLiveEvenWithoutItsSource(t *testing.T) {
 
 func TestLiveOnlyMakesNoDisks(t *testing.T) {
 	dir := liveContainer(t, true, engine.Mount{Source: t.TempDir(), Target: "/data"})
-	if _, err := VZArgs(dir); err != nil {
+	if _, _, err := VZArgs(dir); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, diskDir)); !os.IsNotExist(err) {

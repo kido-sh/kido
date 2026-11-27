@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/kido-sh/kido/internal/engine"
 )
@@ -157,6 +158,7 @@ type Share struct {
 	Name     string
 	Source   string
 	ReadOnly bool
+	Dev, Ino uint64 // of Source when Shares checked it
 }
 
 // Shares returns the container's live mounts, checking that each source is still a directory.
@@ -180,7 +182,11 @@ func Shares(dir string) ([]Share, error) {
 		if err != nil {
 			return nil, fmt.Errorf("mount %s: %w", m.Source, err)
 		}
-		shares = append(shares, Share{Name: shareName(i), Source: m.Source, ReadOnly: m.ReadOnly})
+		sh := Share{Name: shareName(i), Source: m.Source, ReadOnly: m.ReadOnly}
+		if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+			sh.Dev, sh.Ino = uint64(st.Dev), st.Ino
+		}
+		shares = append(shares, sh)
 	}
 	return shares, nil
 }
@@ -241,16 +247,16 @@ func QEMUArgs(dir string) ([]string, error) {
 	return []string{"-readconfig", cfgFile}, nil
 }
 
-// VZArgs returns the kido-vmm arguments that attach the container's Disks and Shares. kido-vmm must
-// run in dir.
-func VZArgs(dir string) ([]string, error) {
+// VZArgs returns the kido-vmm arguments that attach the container's Disks and Shares, and the
+// Shares. kido-vmm must run in dir.
+func VZArgs(dir string) ([]string, []Share, error) {
 	shares, err := Shares(dir)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	disks, err := Disks(dir)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var args []string
 	for _, d := range disks {
@@ -267,7 +273,7 @@ func VZArgs(dir string) ([]string, error) {
 		}
 		args = append(args, flag, sh.Name+"="+sh.Source)
 	}
-	return args, nil
+	return args, shares, nil
 }
 
 // keepUnapplied moves aside the changes of an earlier boot that were collected but never applied,

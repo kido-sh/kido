@@ -300,7 +300,7 @@ func (r *Runtime) vzBoot(ctx context.Context, info *Info) error {
 	for _, f := range []string{"agent.port", "vmm.state", "boot-args"} {
 		os.Remove(filepath.Join(dir, f))
 	}
-	margs, err := mount.VZArgs(dir)
+	margs, shares, err := mount.VZArgs(dir)
 	if err != nil {
 		return err
 	}
@@ -315,6 +315,11 @@ func (r *Runtime) vzBoot(ctx context.Context, info *Info) error {
 		return err
 	}
 	defer vlog.Close()
+	nb, err := openNotify(shares, vlog)
+	if err != nil {
+		return err
+	}
+	defer nb.close()
 
 	netArgs := []string{"kido_ip=" + nw.Guest.String(), "kido_gw=" + nw.Gateway.String(), "kido_dns=" + nw.Gateway.String()}
 	if nw.Mask != "" {
@@ -345,20 +350,28 @@ func (r *Runtime) vzBoot(ctx context.Context, info *Info) error {
 		os.Remove(filepath.Join(dir, "boot-args"))
 		return errors.New("the vz backend needs kido-vmm: install it next to kido or in ../libexec/kido (make install does), or set KIDO_VMM")
 	}
+	var extra []*os.File
 	if users != nil {
 		args = append(args, "--network", netPath)
+		extra = append(extra, users)
+	}
+	if nb != nil {
+		args = append(args, nb.vmmArgs(3+len(extra))...)
+		extra = append(extra, nb.w)
 	}
 	cmd := exec.Command(vmm, args...)
 	cmd.Dir = dir
 	cmd.Stdout = vlog
 	cmd.Stderr = vlog
-	if users != nil {
-		cmd.ExtraFiles = []*os.File{users}
-	}
+	cmd.ExtraFiles = extra
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
 		os.Remove(filepath.Join(dir, "boot-args"))
 		return fmt.Errorf("start %s: %w", vmm, err)
+	}
+	if nb != nil {
+		nb.w.Close()
+		nb.w = nil
 	}
 	exited := make(chan struct{})
 	go func() {
@@ -386,6 +399,9 @@ func (r *Runtime) vzBoot(ctx context.Context, info *Info) error {
 	err = r.waitAgent(ctx, info.ID, agentPort, exited)
 	if err == nil {
 		if err = mount.Populate(ctx, dir, r.mountGuest(info.ID)); err == nil {
+			if nb != nil {
+				r.startRelay(info.ID, dir, nb, vlog)
+			}
 			return nil
 		}
 		cmd.Process.Kill()
