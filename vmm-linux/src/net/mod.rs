@@ -1249,15 +1249,17 @@ impl NetEngine {
                 }
             }
 
-            if sess.pending_to_host.is_empty() && sess.host.is_some() {
+            if sess.pending_to_host.is_empty() {
                 while sock.can_recv() {
+                    let Some(stream) = sess.host.as_mut() else {
+                        break;
+                    };
                     let Ok(n) = sock.recv_slice(&mut rx_buf) else {
                         break;
                     };
                     if n == 0 {
                         break;
                     }
-                    let stream = sess.host.as_mut().unwrap();
                     let mut written = 0usize;
                     let mut failed = false;
                     while written < n {

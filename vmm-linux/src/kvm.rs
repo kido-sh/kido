@@ -741,7 +741,7 @@ fn install_kick_signal_handler() {
     let kick = vcpu_kick_sig();
     unsafe {
         let mut sa: libc::sigaction = std::mem::zeroed();
-        sa.sa_sigaction = noop_sig_handler as usize;
+        sa.sa_sigaction = noop_sig_handler as *const () as usize;
         sa.sa_flags = 0;
         libc::sigemptyset(&mut sa.sa_mask);
         libc::sigaction(kick, &sa, std::ptr::null_mut());
