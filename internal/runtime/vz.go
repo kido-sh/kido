@@ -393,7 +393,7 @@ func (r *Runtime) vzBoot(ctx context.Context, info *Info) error {
 		case <-exited:
 		case <-time.After(5 * time.Second):
 		}
-		info.PID, info.FinishedAt, info.Error = 0, time.Now().UTC(), err.Error()
+		info.PID, info.FinishedAt, info.Error = 0, time.Now().UTC(), Sanitize(err.Error())
 		r.save(info)
 		return err
 	}
@@ -409,7 +409,7 @@ func (r *Runtime) vzBoot(ctx context.Context, info *Info) error {
 	os.Remove(filepath.Join(dir, "boot-args"))
 	info.PID = 0
 	info.FinishedAt = time.Now().UTC()
-	info.Error = err.Error()
+	info.Error = Sanitize(err.Error())
 	r.save(info)
 	if ctx.Err() != nil {
 		return fmt.Errorf("boot interrupted: %w", ctx.Err())
@@ -421,10 +421,16 @@ func (r *Runtime) vzBoot(ctx context.Context, info *Info) error {
 	if info.Network != "" {
 		msg = fmt.Sprintf("%v (guest %s on network %s)", err, nw.Guest, info.Network)
 	}
+	return vzFailure(vmm, dir, msg)
+}
+
+// vzFailure is a boot error with the end of kido-vmm's log, which can carry text from the guest,
+// made safe to print.
+func vzFailure(vmm, dir, msg string) error {
 	if t := tail(filepath.Join(dir, "vmm.log"), 10); t != "" {
 		msg = "kido-vmm (" + vmm + ") said:\n" + t + "\n" + msg
 	}
-	return errors.New(msg)
+	return errors.New(Sanitize(msg))
 }
 
 // localNetworkBlocked tells macOS's Local Network privacy apart from a wrong subnet: the host has an
