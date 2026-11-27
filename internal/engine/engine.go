@@ -23,14 +23,15 @@ type Mount struct {
 }
 
 type CreateOptions struct {
-	Name     string // optional; generated when empty
-	Image    string // local image name, e.g. "darwin" or "darwin:latest"
-	Ports    []PortMapping
-	CPUs     int // default 2
-	MemoryMB int // default 1024
-	Labels   map[string]string
-	Mounts   []Mount
-	Network  string // "": user-mode NAT; "none": the guest reaches neither the host nor the outside
+	Name       string // optional; generated when empty
+	Image      string // local image name, e.g. "darwin" or "darwin:latest"
+	Ports      []PortMapping
+	CPUs       int // default 2
+	MemoryMB   int // default 1024
+	Labels     map[string]string
+	Mounts     []Mount
+	CopyMounts bool   // copy directories in and back even where they could be mounted live
+	Network    string // "": user-mode NAT; "none": the guest reaches neither the host nor the outside
 }
 
 type ProcessSpec struct {

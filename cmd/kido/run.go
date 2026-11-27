@@ -149,7 +149,8 @@ func ctrRunOrCreate(ctx context.Context, cmdName string, args []string) int {
 	if err != nil {
 		return ctrFail(err)
 	}
-	opts := engine.CreateOptions{Name: *name, Image: fs.Arg(0), CPUs: *cpus, MemoryMB: mem, Network: *network}
+	opts := engine.CreateOptions{Name: *name, Image: fs.Arg(0), CPUs: *cpus, MemoryMB: mem, Network: *network,
+		CopyMounts: mounts.copyDirs}
 	for _, s := range ports {
 		p, err := ctrPort(s)
 		if err != nil {
