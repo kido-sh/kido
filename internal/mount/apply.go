@@ -45,11 +45,18 @@ func Apply(dir string, warn io.Writer) {
 		m := &st.Mounts[i]
 		out := filepath.Join(ddir, fmt.Sprintf("out-%d.img", i))
 		man := filepath.Join(ddir, fmt.Sprintf("manifest-%d.json", i))
-		if m.ReadOnly || !m.Collected {
+		if m.Live || m.ReadOnly || !m.Collected {
 			continue
 		}
 		m.Collected = false
-		if err := applyMount(m, out, man, filepath.Base(dir), home, warn); err != nil {
+		err := sameSource(m.Source)
+		if _, lerr := os.Lstat(m.Source); m.File && errors.Is(lerr, fs.ErrNotExist) {
+			err = sameSource(filepath.Dir(m.Source))
+		}
+		if err == nil {
+			err = applyMount(m, out, man, filepath.Base(dir), home, warn)
+		}
+		if err != nil {
 			kept := filepath.Join(ddir, fmt.Sprintf("unapplied-%d.img", i))
 			if os.Rename(out, kept) == nil {
 				fmt.Fprintf(warn, "kido: mounts: changes in %s were not all copied back: %s; the container's tar is in %s (after the first 64 KiB)\n", m.Target, sanitize(err.Error()), kept)

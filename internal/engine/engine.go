@@ -15,8 +15,7 @@ type PortMapping struct {
 	Protocol  string // "tcp" or "udp"
 }
 
-// Mount copies a host path into the container at every boot and, unless ReadOnly, copies the
-// container's changes back when it stops (see internal/mount).
+// Mount puts a host path at Target in the container, shared live or copied (see internal/mount).
 type Mount struct {
 	Source   string `json:"source"` // absolute host path
 	Target   string `json:"target"` // absolute guest path

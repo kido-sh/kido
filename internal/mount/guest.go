@@ -20,9 +20,10 @@ import (
 type Guest func(ctx context.Context, args []string) ([]byte, error)
 
 // prelude starts every script: a fixed PATH (the scripts run as root, and the agent's PATH puts
-// /usr/local/bin first), absolute program paths below, and rootchain, which refuses a path whose
+// /usr/local/bin first), absolute program paths below, rootchain, which refuses a path whose
 // existing components are not all owned by root, so a non-root user cannot redirect root's writes
-// through a symlink or a directory of their own.
+// through a symlink or a directory of their own, and onroot, which refuses a path that leads onto
+// another file system, such as a live mount, where removing or writing would reach the host.
 const prelude = `PATH=/bin:/usr/bin:/sbin:/usr/sbin
 export PATH
 set -e
@@ -36,6 +37,19 @@ rootchain() {
     p=$p/$c
     if [ ! -e "$p" ] && [ ! -L "$p" ]; then return 0; fi
     if [ "$(/bin/stat -c %u "$p")" != 0 ]; then echo "$p is not owned by root in the container" >&2; return 1; fi
+  done
+}
+onroot() {
+  root=$(/bin/stat -c %d /)
+  p=
+  rest=${1#/}
+  while [ -n "$rest" ]; do
+    c=${rest%%/*}
+    if [ "$c" = "$rest" ]; then rest=; else rest=${rest#*/}; fi
+    p=$p/$c
+    if [ ! -e "$p" ]; then return 0; fi
+    d=$(/bin/stat -L -c %d "$p")
+    if [ "$d" != "$root" ]; then echo "$1 leads into another mount in the container" >&2; return 1; fi
   done
 }
 `
@@ -53,6 +67,7 @@ done`
 const populateScript = prelude + `t=$2
 rootchain "$(/bin/dirname "$t")"
 if [ -L "$t" ]; then echo "$t is a symbolic link in the container" >&2; exit 1; fi
+onroot "$t"
 if [ "$4" = 1 ]; then /bin/rm -rf "$t"; fi
 if [ "$3" = dir ]; then
   if [ -e "$t" ] && [ ! -d "$t" ]; then echo "$t exists in the container and is not a directory" >&2; exit 1; fi
@@ -74,11 +89,26 @@ if [ -n "$avail" ] && [ "$avail" -lt "$5" ]; then
 fi
 /bin/dd if="$1" bs=65536 skip=1 2>/dev/null | /bin/tar -xpf - -C "$dest"`
 
+// liveScript: $1 share name, $2 target, $3 ro|rw. It mounts the share over whatever the image has at
+// the target and never removes anything: the target is the host's own directory once mounted.
+const liveScript = prelude + `t=$2
+rootchain "$(/bin/dirname "$t")"
+if [ -L "$t" ]; then echo "$t is a symbolic link in the container" >&2; exit 1; fi
+onroot "$t"
+if [ -e "$t" ] && [ ! -d "$t" ]; then echo "$t exists in the container and is not a directory" >&2; exit 1; fi
+/bin/mkdir -p "$t"
+if [ "$3" = ro ]; then
+  /sbin/mount -t virtiofs -o ro "kido:$1" "$t"
+else
+  /sbin/mount -t virtiofs "kido:$1" "$t"
+fi`
+
 // collectScript: $1 disk, $2 target, $3 dir|file. It prints how many files it left out because
 // they have more than one link: a hard link can point at a file outside the mount that only root
 // may read.
 const collectScript = prelude + `rootchain "$(/bin/dirname "$2")"
 if [ -L "$2" ]; then echo "$2 is a symbolic link" >&2; exit 1; fi
+onroot "$2"
 if [ "$3" = dir ]; then
   cd "$2"
   /bin/find . -type f -links +1 | /bin/wc -l
@@ -112,11 +142,34 @@ func findDisks(ctx context.Context, g Guest, token string) (map[string]string, e
 	return disks, nil
 }
 
-// Populate copies each source packed by Disks to its target; it runs once the agent answers.
+// Populate copies each source packed by Disks to its target, then mounts each live share; it runs
+// once the agent answers. Copies come first, so none of them can reach into a live mount.
 func Populate(ctx context.Context, dir string, g Guest) error {
 	st, err := load(dir)
 	if st == nil || len(st.Mounts) == 0 {
 		return err
+	}
+	if err := populateCopies(ctx, dir, st, g); err != nil {
+		return err
+	}
+	for i, m := range st.Mounts {
+		if !m.Live {
+			continue
+		}
+		mode := "rw"
+		if m.ReadOnly {
+			mode = "ro"
+		}
+		if _, err := g(ctx, []string{"/bin/sh", "-c", liveScript, "sh", shareName(i), m.Target, mode}); err != nil {
+			return fmt.Errorf("mount %s: %w", m.Target, guestErr(err))
+		}
+	}
+	return nil
+}
+
+func populateCopies(ctx context.Context, dir string, st *state, g Guest) error {
+	if !hasCopies(st) {
+		return nil
 	}
 	disks, err := findDisks(ctx, g, st.Token)
 	if err != nil {
@@ -124,6 +177,9 @@ func Populate(ctx context.Context, dir string, g Guest) error {
 	}
 	for i := range st.Mounts {
 		m := &st.Mounts[i]
+		if m.Live {
+			continue
+		}
 		dev := disks[fmt.Sprintf("in %d", i)]
 		if dev == "" {
 			return fmt.Errorf("mount %s: its disk is missing in the container", m.Target)
@@ -148,9 +204,10 @@ func Populate(ctx context.Context, dir string, g Guest) error {
 	return nil
 }
 
-// Collect has the guest pack each read-write target onto its out disk; it runs before the guest
-// shuts down. Each mount gets its own deadline, so a wedged guest cannot hold up a stop or rm -f.
-// Failures are reported to warn: those changes stay in the container only.
+// Collect has the guest flush its writes to read-write live shares and pack each read-write copied
+// target onto its out disk; it runs before a stop shuts the guest down or rm -f kills it. Each step
+// gets its own deadline, so a wedged guest cannot hold up a stop or rm -f. Failures are reported to
+// warn: those changes stay in the container only.
 func Collect(ctx context.Context, dir string, g Guest, warn io.Writer) {
 	st, err := load(dir)
 	if err != nil {
@@ -161,10 +218,21 @@ func Collect(ctx context.Context, dir string, g Guest, warn io.Writer) {
 		return
 	}
 	var todo []int
+	flush := false
 	for i, m := range st.Mounts {
-		if !m.ReadOnly && m.Populated {
+		switch {
+		case m.Live:
+			flush = flush || !m.ReadOnly
+		case !m.ReadOnly && m.Populated:
 			todo = append(todo, i)
 		}
+	}
+	if flush {
+		fctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		if _, err := g(fctx, []string{"/bin/sync"}); err != nil {
+			fmt.Fprintf(warn, "kido: mounts: writes to live mounts may not all have reached this Mac: %v\n", guestErr(err))
+		}
+		cancel()
 	}
 	if len(todo) == 0 {
 		return

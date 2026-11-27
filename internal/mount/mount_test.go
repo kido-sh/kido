@@ -32,7 +32,7 @@ func boot(t *testing.T, base string, m engine.Mount) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Save(dir, []engine.Mount{m}); err != nil {
+	if err := Save(dir, []engine.Mount{m}, false); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := QEMUArgs(dir); err != nil {

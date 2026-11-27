@@ -122,7 +122,11 @@ func (r *Runtime) prepare(ctx context.Context, opts engine.CreateOptions) (*Info
 		return nil, err
 	}
 	dir := r.dir(info.ID)
-	if err := mount.Save(dir, opts.Mounts); err != nil {
+	live := info.Backend == backendVZ && img.Config.Labels[mount.LiveLabel] == "1"
+	if err := mount.Save(dir, opts.Mounts, live); err != nil {
+		if idRE.MatchString(info.ID) {
+			os.RemoveAll(dir)
+		}
 		return nil, err
 	}
 	backing := filepath.Join(ref.Dir(r.Home), "disk.img")

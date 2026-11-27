@@ -1,10 +1,12 @@
-// Package mount implements kido's copy mounts (-v and --mount type=bind).
+// Package mount implements kido's mounts (-v and --mount type=bind).
 //
-// The guest kernel has no shared-folder filesystem (no NFS client, 9p or virtio-fs), so a mount is a
-// copy: at every boot the host packs the source into a raw tar disk and the guest unpacks it at the
-// target. For a read-write mount, the guest packs the target onto a second disk when the container
-// stops, and the host copies new and changed files back into the source. It never overwrites a
-// file that also changed on the host, and it never deletes host files.
+// On the vz backend, with an image whose guest mounts virtio-fs (LiveLabel), a source directory is
+// shared live: kido-vmm attaches it to the "kido" virtio-fs device and the guest mounts the share at
+// the target once the agent answers. Every other mount is a copy: at every boot the host packs the
+// source into a raw tar disk and the guest unpacks it at the target. For a read-write copy, the
+// guest packs the target onto a second disk when the container stops, and the host copies new and
+// changed files back into the source. It never overwrites a file that also changed on the host, and
+// it never deletes host files.
 package mount
 
 import (
@@ -151,17 +153,28 @@ func checkTarget(t string) (string, error) {
 	return clean, nil
 }
 
-// Check validates a set of resolved mounts: unique targets, none inside another.
+// Check validates a set of resolved mounts: unique targets, none inside another, compared through
+// the guest's /etc, /tmp and /var, which lead to /private.
 func Check(ms []engine.Mount) error {
 	for i, a := range ms {
 		for _, b := range ms[i+1:] {
-			if a.Target == b.Target {
+			at, bt := private(a.Target), private(b.Target)
+			if at == bt {
 				return fmt.Errorf("duplicate mount target %s", a.Target)
 			}
-			if strings.HasPrefix(b.Target, a.Target+"/") || strings.HasPrefix(a.Target, b.Target+"/") {
+			if strings.HasPrefix(bt, at+"/") || strings.HasPrefix(at, bt+"/") {
 				return fmt.Errorf("mount targets %s and %s must not be nested", a.Target, b.Target)
 			}
 		}
 	}
 	return nil
+}
+
+func private(target string) string {
+	for _, a := range []string{"/etc", "/tmp", "/var"} {
+		if target == a || strings.HasPrefix(target, a+"/") {
+			return "/private" + target
+		}
+	}
+	return target
 }

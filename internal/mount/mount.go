@@ -9,10 +9,14 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/kido-sh/kido/internal/engine"
 )
+
+// LiveLabel is the image label that says the guest mounts kido's virtio-fs shares; its value is "1".
+const LiveLabel = "sh.kido.virtiofs"
 
 const (
 	magic      = "KIDOMOUNT1"
@@ -25,6 +29,7 @@ const (
 
 type mountState struct {
 	engine.Mount
+	Live      bool  `json:"live,omitempty"`      // the source directory is shared over virtio-fs, not copied
 	File      bool  `json:"file,omitempty"`      // the source is a regular file
 	Size      int64 `json:"size,omitempty"`      // bytes packed at the last boot
 	Populated bool  `json:"populated,omitempty"` // the target holds a copy kido made
@@ -37,8 +42,9 @@ type state struct {
 }
 
 // Save records the mounts of a new container in its directory dir. The sources must have been
-// resolved (Resolve) and checked (Check).
-func Save(dir string, ms []engine.Mount) error {
+// resolved (Resolve) and checked (Check). With live, which needs the vz backend and an image with
+// LiveLabel, each source that is a directory is shared live; the others are copied.
+func Save(dir string, ms []engine.Mount, live bool) error {
 	if len(ms) == 0 {
 		return nil
 	}
@@ -52,7 +58,11 @@ func Save(dir string, ms []engine.Mount) error {
 			return err
 		}
 		m.Target = t
-		st.Mounts = append(st.Mounts, mountState{Mount: m})
+		fi, err := os.Stat(m.Source)
+		if err != nil {
+			return fmt.Errorf("mount %s: %w", m.Source, err)
+		}
+		st.Mounts = append(st.Mounts, mountState{Mount: m, Live: live && fi.IsDir()})
 	}
 	if err := Check(ms); err != nil {
 		return err
@@ -79,11 +89,11 @@ type Disk struct {
 	ReadOnly bool
 }
 
-// Disks packs every source of the container in dir into a disk and returns the disks to attach, or
-// nil when the container has no mounts. Each File is relative to dir.
+// Disks packs every copied source of the container in dir into a disk and returns the disks to
+// attach, or nil when it has none. Each File is relative to dir.
 func Disks(dir string) ([]Disk, error) {
 	st, err := load(dir)
-	if err != nil || st == nil || len(st.Mounts) == 0 {
+	if err != nil || st == nil || !hasCopies(st) {
 		return nil, err
 	}
 	ddir := filepath.Join(dir, diskDir)
@@ -98,6 +108,12 @@ func Disks(dir string) ([]Disk, error) {
 	var disks []Disk
 	for i := range st.Mounts {
 		m := &st.Mounts[i]
+		if m.Live {
+			continue
+		}
+		if err := sameSource(m.Source); err != nil {
+			return nil, fmt.Errorf("mount %s: %w", m.Source, err)
+		}
 		in := filepath.Join(ddir, fmt.Sprintf("in-%d.img", i))
 		man, size, file, err := packDisk(in, header(st.Token, "in", i), m.Source, m.Target, home, m.ReadOnly)
 		if err != nil {
@@ -127,8 +143,76 @@ func Disks(dir string) ([]Disk, error) {
 	return disks, nil
 }
 
+type Share struct {
+	Name     string
+	Source   string
+	ReadOnly bool
+}
+
+// Shares returns the container's live mounts, checking that each source is still a directory.
+func Shares(dir string) ([]Share, error) {
+	st, err := load(dir)
+	if st == nil {
+		return nil, err
+	}
+	var shares []Share
+	for i, m := range st.Mounts {
+		if !m.Live {
+			continue
+		}
+		if err := sameSource(m.Source); err != nil {
+			return nil, fmt.Errorf("mount %s: %w", m.Source, err)
+		}
+		fi, err := os.Stat(m.Source)
+		if err == nil && !fi.IsDir() {
+			err = errors.New("it is no longer a directory")
+		}
+		if err != nil {
+			return nil, fmt.Errorf("mount %s: %w", m.Source, err)
+		}
+		shares = append(shares, Share{Name: shareName(i), Source: m.Source, ReadOnly: m.ReadOnly})
+	}
+	return shares, nil
+}
+
+func shareName(i int) string { return "m" + strconv.Itoa(i) }
+
+func hasCopies(st *state) bool {
+	for _, m := range st.Mounts {
+		if !m.Live {
+			return true
+		}
+	}
+	return false
+}
+
+// sameSource refuses a source that no longer resolves to itself: a symlink placed in its path
+// since the container was created, for instance through a live mount of a parent directory, must
+// not send the mount somewhere else. A change between this check and its use is not caught.
+func sameSource(src string) error {
+	real, err := filepath.EvalSymlinks(src)
+	if err != nil {
+		return err
+	}
+	if real != src {
+		return fmt.Errorf("the path now leads to %s; refusing to follow it", real)
+	}
+	return nil
+}
+
 // QEMUArgs returns the QEMU arguments that attach the container's Disks. QEMU must run in dir.
 func QEMUArgs(dir string) ([]string, error) {
+	st, err := load(dir)
+	if err != nil {
+		return nil, err
+	}
+	if st != nil {
+		for _, m := range st.Mounts {
+			if m.Live {
+				return nil, fmt.Errorf("mount %s is shared live, which needs the vz backend", m.Source)
+			}
+		}
+	}
 	disks, err := Disks(dir)
 	if err != nil {
 		return nil, err
@@ -147,8 +231,13 @@ func QEMUArgs(dir string) ([]string, error) {
 	return []string{"-readconfig", cfgFile}, nil
 }
 
-// VZArgs returns the kido-vmm arguments that attach the container's Disks. kido-vmm must run in dir.
+// VZArgs returns the kido-vmm arguments that attach the container's Disks and Shares. kido-vmm must
+// run in dir.
 func VZArgs(dir string) ([]string, error) {
+	shares, err := Shares(dir)
+	if err != nil {
+		return nil, err
+	}
 	disks, err := Disks(dir)
 	if err != nil {
 		return nil, err
@@ -160,6 +249,13 @@ func VZArgs(dir string) ([]string, error) {
 			flag = "--extra-disk-ro"
 		}
 		args = append(args, flag, d.File)
+	}
+	for _, sh := range shares {
+		flag := "--share"
+		if sh.ReadOnly {
+			flag = "--share-ro"
+		}
+		args = append(args, flag, sh.Name+"="+sh.Source)
 	}
 	return args, nil
 }
