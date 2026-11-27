@@ -37,6 +37,10 @@ use crate::irq::SpiBackend;
 use crate::memory::GuestMemory;
 #[cfg(target_os = "linux")]
 use crate::mmio::MmioBus;
+#[cfg(target_os = "linux")]
+use crate::pci::ShmRegionMapper;
+#[cfg(target_os = "linux")]
+use crate::virtio::metal::ShmBacking;
 
 #[cfg(target_os = "linux")]
 const KVM_API_VERSION: i32 = 12;
@@ -123,6 +127,87 @@ impl SpiBackend for KvmSpiBackend {
                 Err(_) => break,
             }
         }
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub struct KvmShmMapper {
+    vm: Arc<VmFd>,
+    slot: u32,
+    backing: Arc<ShmBacking>,
+    mapped_gpa: Mutex<Option<u64>>,
+}
+
+#[cfg(target_os = "linux")]
+impl KvmShmMapper {
+    fn set_region_retry(&self, region: kvm_userspace_memory_region) -> Result<(), String> {
+        loop {
+            match unsafe { self.vm.set_user_memory_region(region) } {
+                Ok(()) => return Ok(()),
+                Err(e) if e.errno() == libc::EINTR => continue,
+                Err(e) => {
+                    return Err(format!(
+                        "KVM_SET_USER_MEMORY_REGION(slot={}, gpa={:#x}, size={:#x}): {e}",
+                        region.slot, region.guest_phys_addr, region.memory_size
+                    ));
+                }
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl ShmRegionMapper for KvmShmMapper {
+    fn map(&self, gpa: u64) -> Result<(), String> {
+        let mut guard = self.mapped_gpa.lock().unwrap();
+        if *guard == Some(gpa) {
+            return Ok(());
+        }
+        if let Some(old_gpa) = *guard {
+            let unmap = kvm_userspace_memory_region {
+                slot: self.slot,
+                flags: 0,
+                guest_phys_addr: old_gpa,
+                memory_size: 0,
+                userspace_addr: 0,
+            };
+            self.set_region_retry(unmap)?;
+            *guard = None;
+        }
+        let region = kvm_userspace_memory_region {
+            slot: self.slot,
+            flags: 0,
+            guest_phys_addr: gpa,
+            memory_size: self.backing.size(),
+            userspace_addr: self.backing.host_ptr() as u64,
+        };
+        self.set_region_retry(region)?;
+        *guard = Some(gpa);
+        Ok(())
+    }
+
+    fn unmap(&self) {
+        let mut guard = self.mapped_gpa.lock().unwrap();
+        if let Some(old_gpa) = *guard {
+            let unmap = kvm_userspace_memory_region {
+                slot: self.slot,
+                flags: 0,
+                guest_phys_addr: old_gpa,
+                memory_size: 0,
+                userspace_addr: 0,
+            };
+            match self.set_region_retry(unmap) {
+                Ok(()) => *guard = None,
+                Err(e) => eprintln!("kido-vmm: {e}"),
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for KvmShmMapper {
+    fn drop(&mut self) {
+        self.unmap();
     }
 }
 
@@ -289,6 +374,15 @@ impl KvmVm {
     pub fn spi_backend(&self) -> Arc<dyn SpiBackend> {
         Arc::new(KvmSpiBackend {
             vm: Arc::clone(&self.vm),
+        })
+    }
+
+    pub fn shm_mapper(&self, slot: u32, backing: Arc<ShmBacking>) -> Arc<dyn ShmRegionMapper> {
+        Arc::new(KvmShmMapper {
+            vm: Arc::clone(&self.vm),
+            slot,
+            backing,
+            mapped_gpa: Mutex::new(None),
         })
     }
 

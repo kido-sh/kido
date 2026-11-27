@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::irq::IrqLine;
@@ -51,13 +52,14 @@ impl TransportState {
         irq.set_level(self.isr_status != 0 && !self.intx_disabled);
     }
 
-    fn reset(&mut self, irq: &IrqLine) {
+    fn reset(&mut self, irq: &IrqLine, reset_gen: &AtomicU64) {
         self.device_feature_select = 0;
         self.driver_feature_select = 0;
         self.driver_features = 0;
         self.device_status = 0;
         self.queue_select = 0;
         self.isr_status = 0;
+        reset_gen.fetch_add(1, Ordering::AcqRel);
         for q in &mut self.queues {
             q.reset();
         }
@@ -69,6 +71,7 @@ pub struct VirtioPciDevice {
     device: Box<dyn VirtioDevice>,
     mem: Arc<GuestMemory>,
     irq: IrqLine,
+    reset_generation: AtomicU64,
     state: Mutex<TransportState>,
 }
 
@@ -83,6 +86,7 @@ impl VirtioPciDevice {
             device,
             mem,
             irq,
+            reset_generation: AtomicU64::new(1),
             state: Mutex::new(TransportState {
                 device_feature_select: 0,
                 driver_feature_select: 0,
@@ -94,6 +98,54 @@ impl VirtioPciDevice {
                 bus_master: true,
                 queues,
             }),
+        }
+    }
+
+    pub fn reset_generation(&self) -> u64 {
+        self.reset_generation.load(Ordering::Acquire)
+    }
+
+    pub fn complete_used_with_write(
+        &self,
+        queue_index: u16,
+        head_index: u16,
+        expected_gen: u64,
+        out_segs: &[(u64, u32)],
+        payload: &[u8],
+    ) {
+        let mut s = self.state.lock().unwrap();
+        if self.reset_generation.load(Ordering::Acquire) != expected_gen {
+            return;
+        }
+        let ready_mask = VIRTIO_STATUS_FEATURES_OK | VIRTIO_STATUS_DRIVER_OK;
+        if (s.device_status & ready_mask) != ready_mask
+            || (s.device_status & VIRTIO_STATUS_DEVICE_NEEDS_RESET) != 0
+            || !s.bus_master
+        {
+            return;
+        }
+        let Some(q) = s.queues.get_mut(queue_index as usize) else {
+            return;
+        };
+        if !q.enabled() {
+            return;
+        }
+        let mut written = 0usize;
+        for &(gpa, len) in out_segs {
+            if written >= payload.len() {
+                break;
+            }
+            let chunk = (len as usize).min(payload.len() - written);
+            if chunk > 0 {
+                if self.mem.write_slice(gpa, &payload[written..written + chunk]).is_err() {
+                    break;
+                }
+                written += chunk;
+            }
+        }
+        if q.push_used(&self.mem, head_index, written as u32) {
+            s.isr_status |= 1;
+            s.sync_irq(&self.irq);
         }
     }
 
@@ -309,7 +361,7 @@ impl VirtioPciDevice {
             (COMMON_DEVICE_STATUS, 1) => {
                 let mut status = data[0];
                 if status == 0 {
-                    s.reset(&self.irq);
+                    s.reset(&self.irq, &self.reset_generation);
                     self.device.reset();
                     return;
                 }

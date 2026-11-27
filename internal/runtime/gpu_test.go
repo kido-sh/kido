@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"testing"
 
@@ -42,24 +43,31 @@ func TestPrepareGPUValidation(t *testing.T) {
 		t.Fatalf("expected --gpu-memory requires --gpu error, got %v", err)
 	}
 
-	// --gpu on QEMU and KVM backends must fail cleanly.
+	// --gpu on QEMU must fail cleanly.
 	if _, err := rQEMU.prepare(ctx, engine.CreateOptions{Image: "darwin", GPU: true}); err == nil || !strings.Contains(err.Error(), "vz backend") {
-		t.Fatalf("expected vz backend error on qemu, got %v", err)
-	}
-	rKVM := &Runtime{Home: home, Backend: backendKVM}
-	if _, err := rKVM.prepare(ctx, engine.CreateOptions{Image: "darwin", GPU: true}); err == nil || !strings.Contains(err.Error(), "vz backend") {
-		t.Fatalf("expected vz backend error on kvm, got %v", err)
+		t.Fatalf("expected backend error on qemu, got %v", err)
 	}
 
-	// Range checks on VZ (only run if host supports GPU, i.e. macOS 27+).
-	if gpuSupported() == nil {
-		rVZ := &Runtime{Home: home, Backend: backendVZ}
+	nativeBackend := backendVZ
+	wrongBackend := backendKVM
+	if goruntime.GOOS == "linux" {
+		nativeBackend = backendKVM
+		wrongBackend = backendVZ
+	}
+	rWrong := &Runtime{Home: home, Backend: wrongBackend}
+	if _, err := rWrong.prepare(ctx, engine.CreateOptions{Image: "darwin", GPU: true}); err == nil {
+		t.Fatalf("expected --gpu to fail on mismatched backend %s", wrongBackend)
+	}
+
+	// Range checks on host's native GPU backend (only run if host supports GPU).
+	if gpuSupported(nativeBackend) == nil {
+		rNative := &Runtime{Home: home, Backend: nativeBackend}
 		for _, badMem := range []int{32, 131073} {
-			if _, err := rVZ.prepare(ctx, engine.CreateOptions{Image: "darwin", GPU: true, GPUMemoryMB: badMem}); err == nil || !strings.Contains(err.Error(), "between 64 and 131072") {
+			if _, err := rNative.prepare(ctx, engine.CreateOptions{Image: "darwin", GPU: true, GPUMemoryMB: badMem}); err == nil || !strings.Contains(err.Error(), "between 64 and 131072") {
 				t.Fatalf("expected range error for GPUMemoryMB=%d, got %v", badMem, err)
 			}
 		}
-		info, err := rVZ.prepare(ctx, engine.CreateOptions{Image: "darwin", GPU: true, GPUMemoryMB: 2048})
+		info, err := rNative.prepare(ctx, engine.CreateOptions{Image: "darwin", GPU: true, GPUMemoryMB: 2048})
 		if err != nil {
 			t.Fatalf("prepare valid --gpu failed: %v", err)
 		}

@@ -3,15 +3,33 @@ package runtime
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"strconv"
+
+	"golang.org/x/sys/unix"
 )
 
 func vmnetSupported() error {
 	return errors.New("user networks require macOS 26 or later (vmnet is not available on Linux)")
 }
 
-func gpuSupported() error {
-	return errors.New("--gpu requires the vz backend on macOS 27 or later")
+func gpuSupported(backend string) error {
+	if backend != backendKVM {
+		return errors.New("--gpu on Linux requires the kvm backend")
+	}
+	if VKWorkerPath() == "" {
+		return errors.New("--gpu on Linux requires kido-vk-worker (install it next to kido-vmm, in PATH, or set KIDO_VK_WORKER)")
+	}
+	matches, _ := filepath.Glob("/dev/dri/renderD*")
+	if len(matches) == 0 {
+		return errors.New("--gpu on Linux requires a Vulkan render node under /dev/dri/renderD*")
+	}
+	for _, p := range matches {
+		if unix.Access(p, unix.R_OK|unix.W_OK) == nil {
+			return nil
+		}
+	}
+	return errors.New("--gpu on Linux requires read/write access to /dev/dri/renderD* (add your user to the render group)")
 }
 
 func processRunning(comm string) bool {

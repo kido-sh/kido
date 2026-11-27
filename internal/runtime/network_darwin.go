@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -20,7 +21,10 @@ func vmnetSupported() error {
 	return nil
 }
 
-func gpuSupported() error {
+func gpuSupported(backend string) error {
+	if backend != backendVZ {
+		return errors.New("--gpu on macOS requires the vz backend on macOS 27 or later")
+	}
 	v, err := unix.Sysctl("kern.osproductversion")
 	if err != nil {
 		return err

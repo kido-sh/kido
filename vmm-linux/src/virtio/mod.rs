@@ -1,4 +1,5 @@
 pub mod blk;
+pub mod metal;
 pub mod net;
 pub mod pci;
 pub mod queue;
@@ -14,6 +15,7 @@ pub const VIRTIO_STATUS_DRIVER_OK: u8 = 4;
 pub const VIRTIO_STATUS_FEATURES_OK: u8 = 8;
 pub const VIRTIO_STATUS_DEVICE_NEEDS_RESET: u8 = 64;
 
+pub const VIRTIO_RING_F_INDIRECT_DESC: u64 = 1u64 << 28;
 pub const VIRTIO_F_VERSION_1: u64 = 1u64 << 32;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

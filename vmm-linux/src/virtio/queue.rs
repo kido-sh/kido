@@ -14,7 +14,7 @@ const AVAIL_ELEM_SIZE: u64 = 2;
 const USED_HDR_SIZE: u64 = 4;
 const USED_ELEM_SIZE: u64 = 8;
 
-pub const MAX_CHAIN_BYTES: u64 = 64 * 1024 * 1024;
+pub const MAX_CHAIN_BYTES: u64 = 66 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Descriptor {

@@ -25,6 +25,7 @@ use crate::memory::{MAX_RAM_SIZE, MIN_RAM_SIZE};
 use crate::net::{parse_forward, parse_mac, ForwardSpec, DEFAULT_GUEST_MAC};
 use crate::pl011::DEFAULT_CONSOLE_MAX_BYTES;
 use crate::virtio::blk::DiskSyncMode;
+use crate::virtio::metal::{DEFAULT_LINUX_GPU_MIB, MAX_GPU_MIB, MIN_GPU_MIB};
 
 #[derive(Debug, Clone)]
 struct DiskSpec {
@@ -51,6 +52,9 @@ struct CliConfig {
     mac: [u8; 6],
     forwards: Vec<ForwardSpec>,
     restrict: bool,
+    gpu: bool,
+    gpu_memory_mib: usize,
+    vk_worker: Option<PathBuf>,
 }
 
 fn usage() -> ! {
@@ -60,7 +64,7 @@ fn usage() -> ! {
          [--boot-args STR | --cmdline-file PATH] [--console-log PATH | --console PATH] \
          [--console-max BYTES] [--pin-cpus LIST] [--state-file PATH] [--disk-sync full|none] \
          [--mac AA:BB:CC:DD:EE:FF] [--forward tcp|udp:HOST_IP:HOST_PORT:[GUEST_IP:]GUEST_PORT] \
-         [--restrict] [--version]"
+         [--restrict] [--gpu] [--gpu-memory MIB] [--vk-worker PATH] [--version]"
     );
     std::process::exit(2);
 }
@@ -86,10 +90,17 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<CliConfig, Stri
     let mut mac = DEFAULT_GUEST_MAC;
     let mut forwards: Vec<ForwardSpec> = Vec::new();
     let mut restrict = false;
+    let mut gpu = false;
+    let mut gpu_memory_mib: usize = 0;
+    let mut vk_worker: Option<PathBuf> = None;
 
     while let Some(flag) = iter.next() {
         if flag == "--restrict" {
             restrict = true;
+            continue;
+        }
+        if flag == "--gpu" {
+            gpu = true;
             continue;
         }
         let val = iter
@@ -141,6 +152,12 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<CliConfig, Stri
             },
             "--mac" => mac = parse_mac(&val)?,
             "--forward" => forwards.push(parse_forward(&val)?),
+            "--gpu-memory" => {
+                gpu_memory_mib = val
+                    .parse::<usize>()
+                    .map_err(|_| format!("invalid --gpu-memory '{val}'"))?;
+            }
+            "--vk-worker" => vk_worker = Some(PathBuf::from(val)),
             other => return Err(format!("unknown flag '{other}'")),
         }
     }
@@ -160,9 +177,23 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<CliConfig, Stri
             MAX_RAM_SIZE >> 20
         ));
     }
-    if extra_disks.len() > 29 {
+    if gpu_memory_mib != 0 && !gpu {
+        return Err("--gpu-memory requires --gpu".to_string());
+    }
+    if gpu {
+        if gpu_memory_mib == 0 {
+            gpu_memory_mib = DEFAULT_LINUX_GPU_MIB;
+        }
+        if !(MIN_GPU_MIB..=MAX_GPU_MIB).contains(&gpu_memory_mib) {
+            return Err(format!(
+                "--gpu-memory {gpu_memory_mib} MiB out of range ({MIN_GPU_MIB}..={MAX_GPU_MIB} MiB)"
+            ));
+        }
+    }
+    let max_extra_disks = if gpu { 28 } else { 29 };
+    if extra_disks.len() > max_extra_disks {
         return Err(format!(
-            "too many extra disks ({}, max 29)",
+            "too many extra disks ({}, max {max_extra_disks})",
             extra_disks.len()
         ));
     }
@@ -188,6 +219,9 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<CliConfig, Stri
         mac,
         forwards,
         restrict,
+        gpu,
+        gpu_memory_mib,
+        vk_worker,
     })
 }
 
@@ -238,10 +272,11 @@ fn run_vm(cfg: CliConfig) -> Result<(), String> {
     use crate::memory::{GuestMemory, RAM_BASE};
     use crate::mmio::MmioBus;
     use crate::net::NetEngine;
-    use crate::pci::{pci_intx_spi, PciBus};
+    use crate::pci::{pci_intx_spi, PciBus, ShmBarConfig};
     use crate::pl011::{ConsoleSink, Pl011};
     use crate::pl031::Pl031;
     use crate::virtio::blk::VirtioBlk;
+    use crate::virtio::metal::{VirtioMetal, VirtioMetalAdapter};
     use crate::virtio::net::{NetChannel, VirtioNet};
     use crate::virtio::pci::VirtioPciDevice;
 
@@ -354,8 +389,33 @@ fn run_vm(cfg: CliConfig) -> Result<(), String> {
     }));
     pci_bus.add_virtio_device(2, net_vpci)?;
 
+    let mut metal_dev: Option<Arc<VirtioMetal>> = None;
+    let extra_disk_slot_base: usize = if cfg.gpu {
+        if pa_bits < 40 {
+            return Err(format!(
+                "--gpu requires at least 40-bit KVM IPA for 64-bit GPU shared memory BAR (got {pa_bits}-bit)"
+            ));
+        }
+        let shm_bytes = (cfg.gpu_memory_mib as u64) << 20;
+        let metal = VirtioMetal::launch(shm_bytes, cfg.vk_worker.as_deref())?;
+        let metal_spi = pci_intx_spi(3, 1);
+        let metal_vpci = Arc::new(VirtioPciDevice::new(
+            Box::new(VirtioMetalAdapter(Arc::clone(&metal))),
+            Arc::clone(&mem),
+            spi_mux.line(metal_spi, 3),
+        ));
+        metal.start_worker(Arc::clone(&metal_vpci), Arc::clone(&mem))?;
+        let shm_mapper = vm.shm_mapper(1, metal.shm_backing());
+        let shm_cfg = ShmBarConfig::new(metal.shm_size(), shm_mapper)?;
+        pci_bus.add_virtio_device_with_shm(3, metal_vpci, Some(shm_cfg))?;
+        metal_dev = Some(metal);
+        4
+    } else {
+        3
+    };
+
     for (i, spec) in cfg.extra_disks.iter().enumerate() {
-        let dev_num = (3 + i) as u8;
+        let dev_num = (extra_disk_slot_base + i) as u8;
         let blk = VirtioBlk::open(&spec.path, spec.read_only, cfg.disk_sync, disk_idx)?;
         disk_idx += 1;
         let spi = pci_intx_spi(dev_num, 1);
@@ -405,6 +465,9 @@ fn run_vm(cfg: CliConfig) -> Result<(), String> {
     net_shutdown.store(true, Ordering::Release);
     net_pause.wake_shutdown();
     let _ = net_handle.join();
+    if let Some(metal) = metal_dev.take() {
+        metal.shutdown();
+    }
     drop(sig_fd);
 
     pci_bus.flush_all();

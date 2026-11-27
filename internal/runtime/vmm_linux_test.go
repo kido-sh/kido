@@ -3,6 +3,8 @@
 package runtime
 
 import (
+	"os"
+	"path/filepath"
 	"slices"
 	"testing"
 
@@ -51,5 +53,53 @@ func TestKVMBootArgs(t *testing.T) {
 		if !slices.Contains(cowArgs, want) {
 			t.Errorf("kvmBootArgs(cow) missing %q in %v", want, cowArgs)
 		}
+	}
+	infoGPU := *info
+	infoGPU.GPU = true
+	infoGPU.GPUMemoryMB = 512
+	tmpWorker := filepath.Join(t.TempDir(), "kido-vk-worker")
+	if err := os.WriteFile(tmpWorker, []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("KIDO_VK_WORKER", tmpWorker)
+	gpuArgs := kvmBootArgs(&infoGPU, "/img", "02:dc:72:a1:b2:c3", 41234, nil, nil, false)
+	for _, want := range []string{"--gpu", "--gpu-memory", "512", "--vk-worker", tmpWorker} {
+		if !slices.Contains(gpuArgs, want) {
+			t.Errorf("kvmBootArgs(gpu) missing %q in %v", want, gpuArgs)
+		}
+	}
+}
+
+func TestVKWorkerPathAndGPUSupportedLinux(t *testing.T) {
+	if err := gpuSupported(backendVZ); err == nil {
+		t.Fatal("expected gpuSupported(backendVZ) to fail on Linux")
+	}
+
+	dir := t.TempDir()
+	nonExec := filepath.Join(dir, "kido-vk-worker-noexec")
+	if err := os.WriteFile(nonExec, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("KIDO_VK_WORKER", nonExec)
+	if got := VKWorkerPath(); got != "" {
+		t.Fatalf("expected non-executable KIDO_VK_WORKER to return empty, got %q", got)
+	}
+
+	execPath := filepath.Join(dir, "kido-vk-worker")
+	if err := os.WriteFile(execPath, []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("KIDO_VK_WORKER", execPath)
+	if got := VKWorkerPath(); got != execPath {
+		t.Fatalf("VKWorkerPath = %q, want %q", got, execPath)
+	}
+
+	t.Setenv("KIDO_VK_WORKER", "")
+	t.Setenv("KIDO_VMM", filepath.Join(dir, "kido-vmm"))
+	if err := os.WriteFile(filepath.Join(dir, "kido-vmm"), []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if got := VKWorkerPath(); got != execPath {
+		t.Fatalf("VKWorkerPath sibling = %q, want %q", got, execPath)
 	}
 }

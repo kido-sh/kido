@@ -30,6 +30,9 @@ pub const PL031_SPI: u32 = 2;
 pub const PCIE_MMIO32_BASE: u64 = 0x1000_0000;
 pub const PCIE_MMIO32_SIZE: u64 = 0x2eff_0000;
 
+pub const PCIE_MMIO64_BASE: u64 = 0x80_0000_0000;
+pub const PCIE_MMIO64_SIZE: u64 = 0x40_0000_0000;
+
 pub const PCIE_ECAM_HIGH_BASE: u64 = 0x40_1000_0000;
 pub const PCIE_ECAM_HIGH_SIZE: u64 = 0x1000_0000;
 pub const PCIE_ECAM_LOW_BASE: u64 = 0x3f00_0000;
@@ -477,19 +480,30 @@ pub fn build_fdt(cfg: &FdtConfig<'_>) -> Result<Vec<u8>, String> {
     fdt.property_array_u64("reg", &[cfg.ecam.base, cfg.ecam.size])
         .map_err(|e| format!("pcie reg: {e}"))?;
     // 32-bit non-prefetchable MMIO window: 0x1000_0000..0x3efe_ffff
-    fdt.property_array_u32(
-        "ranges",
-        &[
-            0x0200_0000,
-            (PCIE_MMIO32_BASE >> 32) as u32,
-            PCIE_MMIO32_BASE as u32,
-            (PCIE_MMIO32_BASE >> 32) as u32,
-            PCIE_MMIO32_BASE as u32,
-            (PCIE_MMIO32_SIZE >> 32) as u32,
-            PCIE_MMIO32_SIZE as u32,
-        ],
-    )
-    .map_err(|e| format!("pcie ranges: {e}"))?;
+    // When PA >= 40 bits (high ECAM), also advertise the 64-bit prefetchable window
+    // at 0x80_0000_0000..0xbf_ffff_ffff for large VirtIO shared memory BARs.
+    let mut ranges = vec![
+        0x0200_0000,
+        (PCIE_MMIO32_BASE >> 32) as u32,
+        PCIE_MMIO32_BASE as u32,
+        (PCIE_MMIO32_BASE >> 32) as u32,
+        PCIE_MMIO32_BASE as u32,
+        (PCIE_MMIO32_SIZE >> 32) as u32,
+        PCIE_MMIO32_SIZE as u32,
+    ];
+    if cfg.ecam.base >= 0x1_0000_0000 {
+        ranges.extend_from_slice(&[
+            0x4300_0000,
+            (PCIE_MMIO64_BASE >> 32) as u32,
+            PCIE_MMIO64_BASE as u32,
+            (PCIE_MMIO64_BASE >> 32) as u32,
+            PCIE_MMIO64_BASE as u32,
+            (PCIE_MMIO64_SIZE >> 32) as u32,
+            PCIE_MMIO64_SIZE as u32,
+        ]);
+    }
+    fdt.property_array_u32("ranges", &ranges)
+        .map_err(|e| format!("pcie ranges: {e}"))?;
     fdt.property_array_u32("interrupt-map-mask", &[0x1800, 0, 0, 0x7])
         .map_err(|e| format!("pcie interrupt-map-mask: {e}"))?;
     let mut irq_map = Vec::with_capacity(16 * 10);
@@ -677,8 +691,15 @@ mod tests {
             u64::from_be_bytes(pcie_reg[8..16].try_into().unwrap()),
             PCIE_ECAM_HIGH_SIZE
         );
+        let pcie_ranges = find("/pcie@10000000", "ranges").unwrap();
+        assert_eq!(pcie_ranges.len(), 56);
+        assert_eq!(be32(&pcie_ranges, 28), 0x4300_0000);
+        assert_eq!(
+            u64::from_be_bytes(pcie_ranges[32..40].try_into().unwrap()),
+            PCIE_MMIO64_BASE
+        );
 
-        // Low PA < 40 bits switches ECAM to 0x3f00_0000
+        // Low PA < 40 bits switches ECAM to 0x3f00_0000 and omits 64-bit MMIO range
         let dtb_low = build_fdt(&FdtConfig {
             ram_base: RAM_BASE,
             ram_size: 512 * 1024 * 1024,
@@ -701,5 +722,12 @@ mod tests {
             u64::from_be_bytes(reg_low[0..8].try_into().unwrap()),
             PCIE_ECAM_LOW_BASE
         );
+        let ranges_low = props_low
+            .iter()
+            .find(|(p, n, _)| p == "/pcie@10000000" && n == "ranges")
+            .unwrap()
+            .2
+            .clone();
+        assert_eq!(ranges_low.len(), 28);
     }
 }

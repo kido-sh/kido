@@ -27,7 +27,41 @@ const (
 	kvmGatewayIP = "10.0.2.2"
 	kvmDNSIP     = "10.0.2.3"
 	kvmMaxCPUs   = 32
+	vkWorkerComm = "kido-vk-worker"
 )
+
+func VKWorkerPath() string {
+	if p := os.Getenv("KIDO_VK_WORKER"); p != "" {
+		if st, err := os.Stat(p); err == nil && st.Mode().IsRegular() && st.Mode().Perm()&0o111 != 0 {
+			return p
+		}
+		return ""
+	}
+	var dirs []string
+	if vmm := VMMPath(); vmm != "" {
+		if real, err := filepath.EvalSymlinks(vmm); err == nil {
+			vmm = real
+		}
+		dirs = append(dirs, filepath.Dir(vmm))
+	}
+	if exe, err := os.Executable(); err == nil && exe != "" {
+		if real, err := filepath.EvalSymlinks(exe); err == nil {
+			exe = real
+		}
+		d := filepath.Dir(exe)
+		dirs = append(dirs, d, filepath.Join(d, "..", "libexec", "kido"))
+	}
+	for _, d := range dirs {
+		p := filepath.Join(d, vkWorkerComm)
+		if st, err := os.Stat(p); err == nil && st.Mode().IsRegular() && st.Mode().Perm()&0o111 != 0 {
+			return p
+		}
+	}
+	if p, err := exec.LookPath(vkWorkerComm); err == nil {
+		return p
+	}
+	return ""
+}
 
 func linuxKVMAvailable() bool {
 	if VMMPath() == "" {
@@ -120,6 +154,15 @@ func kvmBootArgs(info *Info, imgDir, mac string, agentPort int, pinCPUs []int, m
 	}
 	if info.Network == NetworkNone {
 		args = append(args, "--restrict")
+	}
+	if info.GPU {
+		args = append(args, "--gpu")
+		if info.GPUMemoryMB > 0 {
+			args = append(args, "--gpu-memory", strconv.Itoa(info.GPUMemoryMB))
+		}
+		if w := VKWorkerPath(); w != "" {
+			args = append(args, "--vk-worker", w)
+		}
 	}
 	args = append(args, "--forward", fmt.Sprintf("tcp:127.0.0.1:%d:%s:%d", agentPort, kvmGuestIP, proto.DefaultPort))
 	for _, p := range info.Ports {

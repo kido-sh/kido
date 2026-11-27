@@ -79,10 +79,10 @@ func (r *Runtime) prepare(ctx context.Context, opts engine.CreateOptions) (*Info
 		return nil, errors.New("--gpu-memory requires --gpu")
 	}
 	if opts.GPU {
-		if r.Backend != backendVZ {
-			return nil, errors.New("--gpu requires the vz backend on macOS 27 or later")
+		if r.Backend != backendVZ && r.Backend != backendKVM {
+			return nil, errors.New("--gpu requires the vz backend on macOS 27+ or the kvm backend on Linux")
 		}
-		if err := gpuSupported(); err != nil {
+		if err := gpuSupported(r.Backend); err != nil {
 			return nil, err
 		}
 		if opts.GPUMemoryMB != 0 && (opts.GPUMemoryMB < 64 || opts.GPUMemoryMB > 131072) {
