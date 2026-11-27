@@ -86,6 +86,10 @@ func (r *Runtime) agentCred(id string) (*agentCred, error) {
 // The port is free when the VM process is started, so another local user can bind it first: nothing
 // is sent to it until the VM process itself listens there.
 func (r *Runtime) waitAgent(ctx context.Context, id string, port int, exited <-chan struct{}) error {
+	return r.waitAgentTimeout(ctx, id, port, exited, readyTimeout)
+}
+
+func (r *Runtime) waitAgentTimeout(ctx context.Context, id string, port int, exited <-chan struct{}, timeout time.Duration) error {
 	key, err := r.hostKey(id)
 	if err != nil {
 		return err
@@ -94,11 +98,11 @@ func (r *Runtime) waitAgent(ctx context.Context, id string, port int, exited <-c
 	if err != nil {
 		return err
 	}
-	if err := waitListener(ctx, info.PID, port, exited); err != nil {
+	if err := waitListenerTimeout(ctx, info.PID, port, exited, timeout); err != nil {
 		return err
 	}
 	cred := &agentCred{key: key}
-	if err := waitReady(ctx, port, cred, exited); err != nil {
+	if err := waitReadyTimeout(ctx, port, cred, exited, timeout); err != nil {
 		return err
 	}
 	if !processAlive(info.PID, info.PIDStart) {
@@ -110,7 +114,11 @@ func (r *Runtime) waitAgent(ctx context.Context, id string, port int, exited <-c
 // waitListener waits until process pid listens on 127.0.0.1:port. Once it does, the kernel keeps
 // every other process off that address and port.
 func waitListener(ctx context.Context, pid, port int, exited <-chan struct{}) error {
-	deadline := time.Now().Add(readyTimeout)
+	return waitListenerTimeout(ctx, pid, port, exited, readyTimeout)
+}
+
+func waitListenerTimeout(ctx context.Context, pid, port int, exited <-chan struct{}, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
 	for {
 		ok, err := processListensLoopback(ctx, pid, port)
 		if err == nil && ok {

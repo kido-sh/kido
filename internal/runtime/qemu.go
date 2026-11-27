@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	goruntime "runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -29,6 +28,12 @@ const (
 	defaultCPUs   = 2
 	defaultMemory = 1024
 )
+
+type qemuLaunch struct {
+	machineArgs  []string
+	readyTimeout time.Duration
+	start        func(*exec.Cmd) error
+}
 
 func (r *Runtime) Create(ctx context.Context, opts engine.CreateOptions) (*engine.Container, error) {
 	info, err := r.prepare(ctx, opts)
@@ -59,12 +64,11 @@ func (r *Runtime) prepare(ctx context.Context, opts engine.CreateOptions) (*Info
 	if opts.Name != "" && !ValidName(opts.Name) {
 		return nil, fmt.Errorf("invalid container name %q: must match %s", opts.Name, nameRE)
 	}
-	if opts.CPUs == 0 {
-		opts.CPUs = defaultCPUs
+	cpus, err := resolveQEMUCPUs(opts.CPUs, r.Backend)
+	if err != nil {
+		return nil, err
 	}
-	if opts.CPUs < 1 || opts.CPUs > goruntime.NumCPU() {
-		return nil, fmt.Errorf("--cpus %d: must be between 1 and %d", opts.CPUs, goruntime.NumCPU())
-	}
+	opts.CPUs = cpus
 	if opts.MemoryMB == 0 {
 		opts.MemoryMB = defaultMemory
 	}
@@ -274,6 +278,13 @@ func (r *Runtime) boot(ctx context.Context, info *Info) error {
 	if !uuidRE.MatchString(info.RootUUID) {
 		return fmt.Errorf("image %s: invalid root UUID %q", info.Image, info.RootUUID)
 	}
+	if r.QEMUErr != nil {
+		return r.QEMUErr
+	}
+	launch, err := prepareQEMUBoot(info.CPUs)
+	if err != nil {
+		return err
+	}
 	authArgs, err := r.authBootArgs(info.ID)
 	if err != nil {
 		return err
@@ -322,31 +333,17 @@ func (r *Runtime) boot(ctx context.Context, info *Info) error {
 	if err := writeFileAtomic(filepath.Join(dir, "qemu.cfg"), []byte("[machine]\n  append = \""+bootArgs+"\"\n")); err != nil {
 		return err
 	}
-	args := []string{
-		"-machine", "virt,gic-version=3", "-accel", "hvf", "-cpu", "host",
-		"-smp", strconv.Itoa(info.CPUs), "-m", strconv.Itoa(info.MemoryMB),
-		"-kernel", filepath.Join(imgDir, "kernel"), "-initrd", filepath.Join(imgDir, "initrd.cpio"),
-		"-readconfig", "qemu.cfg",
-		"-drive", "if=none,id=root,file=disk.qcow2,format=qcow2", "-device", "virtio-blk-pci,drive=root",
-		"-netdev", netdev, "-device", "virtio-net-pci,netdev=net0",
-		"-display", "none", "-serial", "stdio",
-		"-monitor", "unix:monitor.sock,server=on,wait=off",
-		"-pidfile", "qemu.pid", "-no-reboot",
-	}
 	margs, err := mount.QEMUArgs(dir)
 	if err != nil {
 		return err
 	}
-	args = append(args, margs...)
-	if r.QEMUErr != nil {
-		return r.QEMUErr
-	}
+	args := qemuBootArgs(launch, info, imgDir, netdev, margs)
 	cmd := exec.Command(r.QEMU, args...)
 	cmd.Dir = dir
 	cmd.Stdout = console
 	cmd.Stderr = qlog
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	if err := cmd.Start(); err != nil {
+	if err := launch.start(cmd); err != nil {
 		return fmt.Errorf("start %s: %w", r.QEMU, err)
 	}
 	exited := make(chan struct{})
@@ -372,7 +369,7 @@ func (r *Runtime) boot(ctx context.Context, info *Info) error {
 		return err
 	}
 
-	err = r.waitAgent(ctx, info.ID, agentPort, exited)
+	err = r.waitAgentTimeout(ctx, info.ID, agentPort, exited, launch.readyTimeout)
 	os.Remove(filepath.Join(dir, "qemu.cfg"))
 	if err == nil {
 		if err = mount.Populate(ctx, dir, r.mountGuest(info.ID)); err == nil {
@@ -409,9 +406,29 @@ func (r *Runtime) boot(ctx context.Context, info *Info) error {
 	return errors.New(Sanitize(msg))
 }
 
+func qemuBootArgs(launch *qemuLaunch, info *Info, imgDir, netdev string, mountArgs []string) []string {
+	args := make([]string, 0, len(launch.machineArgs)+24+len(mountArgs))
+	args = append(args, launch.machineArgs...)
+	args = append(args,
+		"-smp", strconv.Itoa(info.CPUs), "-m", strconv.Itoa(info.MemoryMB),
+		"-kernel", filepath.Join(imgDir, "kernel"), "-initrd", filepath.Join(imgDir, "initrd.cpio"),
+		"-readconfig", "qemu.cfg",
+		"-drive", "if=none,id=root,file=disk.qcow2,format=qcow2", "-device", "virtio-blk-pci,drive=root",
+		"-netdev", netdev, "-device", "virtio-net-pci,netdev=net0,romfile=",
+		"-display", "none", "-serial", "stdio",
+		"-monitor", "unix:monitor.sock,server=on,wait=off",
+		"-pidfile", "qemu.pid", "-no-reboot",
+	)
+	return append(args, mountArgs...)
+}
+
 // waitReady pings until an agent proves its identity, which it records in cred.
 func waitReady(ctx context.Context, port int, cred *agentCred, exited <-chan struct{}) error {
-	deadline := time.Now().Add(readyTimeout)
+	return waitReadyTimeout(ctx, port, cred, exited, readyTimeout)
+}
+
+func waitReadyTimeout(ctx context.Context, port int, cred *agentCred, exited <-chan struct{}, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
 	var last error
 	for time.Now().Before(deadline) {
 		select {
@@ -435,9 +452,9 @@ func waitReady(ctx context.Context, port int, cred *agentCred, exited <-chan str
 		}
 	}
 	if errors.Is(last, io.EOF) || errors.Is(last, syscall.ECONNRESET) {
-		return fmt.Errorf("guest agent did not answer within %s: the guest closes every connection to its agent port, so the image has an older kido-agent or none; rebake or re-import the image", readyTimeout)
+		return fmt.Errorf("guest agent did not answer within %s: the guest closes every connection to its agent port, so the image has an older kido-agent or none; rebake or re-import the image", timeout)
 	}
-	return fmt.Errorf("guest agent did not answer within %s (last error: %v)", readyTimeout, last)
+	return fmt.Errorf("guest agent did not answer within %s (last error: %v)", timeout, last)
 }
 
 func tail(path string, lines int) string {
