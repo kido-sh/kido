@@ -331,6 +331,12 @@ func (r *Runtime) vzBoot(ctx context.Context, info *Info) error {
 	for _, p := range info.Ports {
 		args = append(args, "--forward", fmt.Sprintf("%s:%s:%d:%s:%d", p.Protocol, p.HostIP, p.HostPort, nw.Guest, p.GuestPort))
 	}
+	if info.GPU {
+		args = append(args, "--gpu")
+		if info.GPUMemoryMB > 0 {
+			args = append(args, "--gpu-memory", strconv.Itoa(info.GPUMemoryMB))
+		}
+	}
 	args = append(args, margs...)
 	vmm := VMMPath()
 	if vmm == "" {

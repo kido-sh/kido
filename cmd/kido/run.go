@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"os"
 	"os/exec"
@@ -69,9 +70,14 @@ func ctrPort(s string) (engine.PortMapping, error) {
 
 // ctrMemory parses --memory as MB, with an optional m or g suffix.
 func ctrMemory(s string) (int, error) {
+	return ctrMemoryFlag("--memory", s)
+}
+
+func ctrMemoryFlag(flag, s string) (int, error) {
 	if s == "" {
 		return 0, nil
 	}
+	orig := s
 	mult := 1
 	switch strings.ToLower(s[len(s)-1:]) {
 	case "g":
@@ -80,8 +86,8 @@ func ctrMemory(s string) (int, error) {
 		s = s[:len(s)-1]
 	}
 	n, err := strconv.Atoi(s)
-	if err != nil || n <= 0 {
-		return 0, fmt.Errorf("invalid --memory %q (MB, or a number with an m or g suffix)", s)
+	if err != nil || n <= 0 || n > math.MaxInt/mult {
+		return 0, fmt.Errorf("invalid %s %q (MB, or a number with an m or g suffix)", flag, orig)
 	}
 	return n * mult, nil
 }
@@ -117,10 +123,12 @@ func ctrRunOrCreate(ctx context.Context, cmdName string, args []string) int {
 	network := fs.String("network", "", "a network from 'kido network create' (vz backend), or none: no outside access (published ports still work)")
 	memory := fs.String("memory", "", "memory in MB, or with an m/g suffix (default 1024)")
 	fs.StringVar(memory, "m", "", "memory (same as --memory)")
+	gpu := fs.Bool("gpu", false, "enable Metal GPU passthrough (vz backend, macOS 27+)")
+	gpuMemory := fs.String("gpu-memory", "", "GPU shared memory limit in MB, or with an m/g suffix (requires --gpu)")
 	pull := fs.String("pull", "missing", `pull the image before running ("missing" or "never")`)
 	restart := fs.String("restart", "no", "restart the main process when it exits: no, on-failure[:max-retries], always or unless-stopped (needs -d)")
 	mounts := ctrMountFlags(fs)
-	valued := []string{"name", "e", "env", "p", "publish", "w", "workdir", "u", "user", "cpus", "memory", "m", "entrypoint", "v", "volume", "mount", "env-file", "pull", "restart"}
+	valued := []string{"name", "e", "env", "p", "publish", "w", "workdir", "u", "user", "cpus", "memory", "m", "gpu-memory", "entrypoint", "v", "volume", "mount", "env-file", "pull", "restart"}
 	if err := fs.Parse(ctrExpand(args, "itd", valued...)); err != nil {
 		return 125
 	}
@@ -149,8 +157,12 @@ func ctrRunOrCreate(ctx context.Context, cmdName string, args []string) int {
 	if err != nil {
 		return ctrFail(err)
 	}
-	opts := engine.CreateOptions{Name: *name, Image: fs.Arg(0), CPUs: *cpus, MemoryMB: mem, Network: *network,
-		CopyMounts: mounts.copyDirs}
+	gpuMem, err := ctrMemoryFlag("--gpu-memory", *gpuMemory)
+	if err != nil {
+		return ctrFail(err)
+	}
+	opts := engine.CreateOptions{Name: *name, Image: fs.Arg(0), CPUs: *cpus, MemoryMB: mem, GPU: *gpu, GPUMemoryMB: gpuMem,
+		Network: *network, CopyMounts: mounts.copyDirs}
 	for _, s := range ports {
 		p, err := ctrPort(s)
 		if err != nil {

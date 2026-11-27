@@ -92,33 +92,35 @@ type Process struct {
 
 // Info is container.json: everything kido knows about a container.
 type Info struct {
-	ID         string               `json:"id"`
-	Name       string               `json:"name"`
-	Image      string               `json:"image"`
-	Created    time.Time            `json:"created"`
-	Ports      []engine.PortMapping `json:"ports,omitempty"`
-	Network    string               `json:"network,omitempty"`
-	IP         string               `json:"ip,omitempty"`     // vz on a network: the container's address
-	Subnet     string               `json:"subnet,omitempty"` // vz with --network none: its private subnet
-	CPUs       int                  `json:"cpus"`
-	MemoryMB   int                  `json:"memoryMB"`
-	Labels     map[string]string    `json:"labels,omitempty"`
-	RootUUID   string               `json:"rootUUID"`
-	Main       *Process             `json:"main,omitempty"`
-	Detached   bool                 `json:"detached,omitempty"`
-	AutoRemove bool                 `json:"autoRemove,omitempty"`
-	Restart    string               `json:"restart,omitempty"` // policy: always, unless-stopped or on-failure[:N]
-	Restarts   int                  `json:"restartCount,omitempty"`
-	UserStop   bool                 `json:"userStopped,omitempty"` // kido stop or kill: no restart until a kido start
-	Backend    string               `json:"backend,omitempty"`
-	AgentPort  int                  `json:"agentPort,omitempty"`
-	PID        int                  `json:"pid,omitempty"`
-	PIDStart   int64                `json:"pidStart,omitempty"`
-	StartedAt  time.Time            `json:"startedAt,omitzero"`
-	FinishedAt time.Time            `json:"finishedAt,omitzero"`
-	ExitCode   *int                 `json:"exitCode,omitempty"`
-	Stopping   bool                 `json:"stopping,omitempty"`
-	Error      string               `json:"error,omitempty"`
+	ID          string               `json:"id"`
+	Name        string               `json:"name"`
+	Image       string               `json:"image"`
+	Created     time.Time            `json:"created"`
+	Ports       []engine.PortMapping `json:"ports,omitempty"`
+	Network     string               `json:"network,omitempty"`
+	IP          string               `json:"ip,omitempty"`     // vz on a network: the container's address
+	Subnet      string               `json:"subnet,omitempty"` // vz with --network none: its private subnet
+	CPUs        int                  `json:"cpus"`
+	MemoryMB    int                  `json:"memoryMB"`
+	GPU         bool                 `json:"gpu,omitempty"`
+	GPUMemoryMB int                  `json:"gpuMemoryMB,omitempty"`
+	Labels      map[string]string    `json:"labels,omitempty"`
+	RootUUID    string               `json:"rootUUID"`
+	Main        *Process             `json:"main,omitempty"`
+	Detached    bool                 `json:"detached,omitempty"`
+	AutoRemove  bool                 `json:"autoRemove,omitempty"`
+	Restart     string               `json:"restart,omitempty"` // policy: always, unless-stopped or on-failure[:N]
+	Restarts    int                  `json:"restartCount,omitempty"`
+	UserStop    bool                 `json:"userStopped,omitempty"` // kido stop or kill: no restart until a kido start
+	Backend     string               `json:"backend,omitempty"`
+	AgentPort   int                  `json:"agentPort,omitempty"`
+	PID         int                  `json:"pid,omitempty"`
+	PIDStart    int64                `json:"pidStart,omitempty"`
+	StartedAt   time.Time            `json:"startedAt,omitzero"`
+	FinishedAt  time.Time            `json:"finishedAt,omitzero"`
+	ExitCode    *int                 `json:"exitCode,omitempty"`
+	Stopping    bool                 `json:"stopping,omitempty"`
+	Error       string               `json:"error,omitempty"`
 
 	State engine.State `json:"state"`
 }
@@ -126,7 +128,8 @@ type Info struct {
 func (i *Info) container() *engine.Container {
 	return &engine.Container{
 		ID: i.ID, Name: i.Name, Image: i.Image, State: i.State, Created: i.Created,
-		Ports: i.Ports, CPUs: i.CPUs, MemoryMB: i.MemoryMB, Labels: i.Labels,
+		Ports: i.Ports, CPUs: i.CPUs, MemoryMB: i.MemoryMB, GPU: i.GPU, GPUMemoryMB: i.GPUMemoryMB,
+		Labels: i.Labels,
 	}
 }
 

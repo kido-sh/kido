@@ -98,10 +98,10 @@ endif
 
 ifeq ($(TARGET_OS),darwin)
 # The Virtualization.framework helper; `make sign` gives it com.apple.security.virtualization.
-$(OUT)/kido-vmm: vmm/kido-vmm.m vmm/notify.c vmm/notify.h
+$(OUT)/kido-vmm: vmm/kido-vmm.m vmm/metal.m vmm/metal.h vmm/kmtl_proto.h vmm/kmtl_shm.c vmm/kmtl_shm.h vmm/notify.c vmm/notify.h
 	@mkdir -p $(OUT)
 	xcrun clang -fobjc-arc -O2 -Wall -Wextra -Wno-unused-parameter -mmacosx-version-min=13.0 \
-	  -framework CoreServices -framework Foundation -framework Virtualization -framework vmnet -o $@ vmm/kido-vmm.m vmm/notify.c
+	  -framework CoreServices -framework Foundation -framework Metal -framework Virtualization -framework vmnet -o $@ vmm/kido-vmm.m vmm/metal.m vmm/kmtl_shm.c vmm/notify.c
 else ifeq ($(TARGET_OS)-$(TARGET_ARCH),linux-arm64)
 $(OUT)/kido-vmm: $(VMM_LINUX_SOURCES)
 	@mkdir -p $(OUT)
@@ -197,8 +197,10 @@ help:
 	@echo "make clean        remove $(OUT)/ and $(DISTDIR)/"
 	@echo "TARGET_OS=linux TARGET_ARCH=arm64 cross-builds for Linux; OUT=DIR DISTDIR=DIR set output dirs"
 
-# notify.c's tests, with the address and undefined-behaviour sanitizers.
+# notify.c and kmtl_shm.c tests, with the address and undefined-behaviour sanitizers.
 test-vmm:
 	@mkdir -p $(OUT)
 	xcrun clang -O1 -g -Wall -Wextra -fsanitize=address,undefined -o $(OUT)/notify_test vmm/notify_test.c vmm/notify.c
 	$(OUT)/notify_test
+	xcrun clang -O1 -g -Wall -Wextra -fsanitize=address,undefined -o $(OUT)/kmtl_shm_test vmm/kmtl_shm_test.c vmm/kmtl_shm.c
+	$(OUT)/kmtl_shm_test

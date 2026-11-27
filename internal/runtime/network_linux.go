@@ -10,6 +10,10 @@ func vmnetSupported() error {
 	return errors.New("user networks require macOS 26 or later (vmnet is not available on Linux)")
 }
 
+func gpuSupported() error {
+	return errors.New("--gpu requires the vz backend on macOS 27 or later")
+}
+
 func processRunning(comm string) bool {
 	entries, err := os.ReadDir("/proc")
 	if err != nil {

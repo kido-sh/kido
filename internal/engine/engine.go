@@ -23,15 +23,17 @@ type Mount struct {
 }
 
 type CreateOptions struct {
-	Name       string // optional; generated when empty
-	Image      string // local image name, e.g. "darwin" or "darwin:latest"
-	Ports      []PortMapping
-	CPUs       int // default 2
-	MemoryMB   int // default 1024
-	Labels     map[string]string
-	Mounts     []Mount
-	CopyMounts bool   // copy directories in and back even where they could be mounted live
-	Network    string // "": user-mode NAT; "none": the guest reaches neither the host nor the outside
+	Name        string // optional; generated when empty
+	Image       string // local image name, e.g. "darwin" or "darwin:latest"
+	Ports       []PortMapping
+	CPUs        int // default 2
+	MemoryMB    int // default 1024
+	GPU         bool
+	GPUMemoryMB int
+	Labels      map[string]string
+	Mounts      []Mount
+	CopyMounts  bool   // copy directories in and back even where they could be mounted live
+	Network     string // "": user-mode NAT; "none": the guest reaches neither the host nor the outside
 }
 
 type ProcessSpec struct {
@@ -61,15 +63,17 @@ const (
 )
 
 type Container struct {
-	ID       string
-	Name     string
-	Image    string
-	State    State
-	Created  time.Time
-	Ports    []PortMapping
-	CPUs     int
-	MemoryMB int
-	Labels   map[string]string
+	ID          string
+	Name        string
+	Image       string
+	State       State
+	Created     time.Time
+	Ports       []PortMapping
+	CPUs        int
+	MemoryMB    int
+	GPU         bool
+	GPUMemoryMB int
+	Labels      map[string]string
 }
 
 type ImageConfig struct {

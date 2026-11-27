@@ -29,7 +29,22 @@
 #include <unistd.h>
 #include <xpc/xpc.h>
 
+#include "metal.h"
 #include "notify.h"
+
+#if defined(__MAC_27_0)
+API_AVAILABLE(macos(27.0))
+static KidoMetalDevice *gMetalDevice;
+#endif
+
+static void shutdownMetal(void) {
+#if defined(__MAC_27_0)
+  if (@available(macOS 27.0, *)) {
+    [gMetalDevice shutdown];
+    gMetalDevice = nil;
+  }
+#endif
+}
 
 static NSDate *gStarted;
 static NSString *gStateFile;
@@ -37,19 +52,28 @@ static atomic_long gLogLeft = 8 << 20;
 static atomic_bool gLogFull;
 
 static void logf_(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
-static void logf_(const char *fmt, ...) {
+static void vlogf_(const char *fmt, va_list ap) {
   if (atomic_load(&gLogFull)) return;
   char buf[1024];
-  va_list ap;
-  va_start(ap, fmt);
   int n = vsnprintf(buf, sizeof(buf), fmt, ap);
-  va_end(ap);
   long cost = (n < 0 ? 0 : MIN(n, (int)sizeof(buf))) + 24;
   if (atomic_fetch_sub(&gLogLeft, cost) < cost) {
     if (!atomic_exchange(&gLogFull, true)) fprintf(stderr, "kido-vmm: log limit reached\n");
     return;
   }
   fprintf(stderr, "kido-vmm %7.3f: %s\n", -gStarted.timeIntervalSinceNow, buf);
+}
+static void logf_(const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  vlogf_(fmt, ap);
+  va_end(ap);
+}
+void kido_vmm_logf(const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  vlogf_(fmt, ap);
+  va_end(ap);
 }
 
 static const char *stateName(VZVirtualMachineState s) {
@@ -710,11 +734,13 @@ static bool notifyStart(int fd, NSArray<NSString *> *roots) {
 @implementation Watcher
 - (void)guestDidStopVirtualMachine:(VZVirtualMachine *)vm {
   logf_("guest powered off");
+  shutdownMetal();
   writeState(VZVirtualMachineStateStopped);
   exit(0);
 }
 - (void)virtualMachine:(VZVirtualMachine *)vm didStopWithError:(NSError *)error {
   logf_("stopped with error: %s", error.localizedDescription.UTF8String);
+  shutdownMetal();
   writeState(VZVirtualMachineStateError);
   exit(3);
 }
@@ -736,15 +762,20 @@ static void usage(void) {
                   "               [--network FILE] [--forward tcp|udp:HOSTIP:HOSTPORT:GUESTIP:GUESTPORT ...]\n"
                   "               [--extra-disk RAW ...] [--extra-disk-ro RAW ...]\n"
                   "               [--share NAME=DIR ...] [--share-ro NAME=DIR ...] [--notify-fd N --watch DIR ...]\n"
+                  "               [--gpu] [--gpu-memory MB]\n"
                   "       kido-vmm hold-network --subnet A.B.C.D/N [--host-only] --network FILE --users FILE\n");
   exit(2);
 }
 
 static void hardStop(VZVirtualMachine *vm, const char *why) {
   logf_("%s: stopping (state %s)", why, stateName(vm.state));
-  if (!vm.canStop) exit(0);
+  if (!vm.canStop) {
+    shutdownMetal();
+    exit(0);
+  }
   [vm stopWithCompletionHandler:^(NSError *err) {
     if (err) logf_("stop: %s", err.localizedDescription.UTF8String);
+    shutdownMetal();
     writeState(VZVirtualMachineStateStopped);
     exit(err ? 4 : 0);
   }];
@@ -766,6 +797,9 @@ int main(int argc, const char **argv) {
     NSString *kernel, *initrd, *disk, *cmdlineFile, *mac, *console, *network, *sync = @"full";
     NSInteger cpus = 2, memoryMB = 1024;
     long long consoleMax = 2 << 20;
+    BOOL useGPU = NO;
+    BOOL hasGPUMemory = NO;
+    long long gpuMemoryMB = 0;
     NSMutableArray<NSValue *> *forwards = [NSMutableArray array];
     NSMutableArray<NSString *> *extraDisks = [NSMutableArray array];
     NSMutableArray<NSNumber *> *extraReadOnly = [NSMutableArray array];
@@ -774,6 +808,10 @@ int main(int argc, const char **argv) {
     int notifyFD = -1;
     for (int i = 1; i < argc; i++) {
       const char *a = argv[i];
+      if (!strcmp(a, "--gpu")) {
+        useGPU = YES;
+        continue;
+      }
       if (i + 1 >= argc) usage();
       NSString *v = @(argv[++i]);
       if (!strcmp(a, "--kernel")) kernel = v;
@@ -782,6 +820,17 @@ int main(int argc, const char **argv) {
       else if (!strcmp(a, "--cmdline-file")) cmdlineFile = v;
       else if (!strcmp(a, "--cpus")) cpus = v.integerValue;
       else if (!strcmp(a, "--memory")) memoryMB = v.integerValue;
+      else if (!strcmp(a, "--gpu-memory")) {
+        char *end = NULL;
+        errno = 0;
+        long long parsed = strtoll(v.UTF8String, &end, 10);
+        if (errno != 0 || !end || end == v.UTF8String || *end != '\0' || parsed < 64 || parsed > 131072) {
+          fprintf(stderr, "kido-vmm: bad --gpu-memory %s (must be 64..131072 MB)\n", v.UTF8String);
+          return 2;
+        }
+        hasGPUMemory = YES;
+        gpuMemoryMB = parsed;
+      }
       else if (!strcmp(a, "--mac")) mac = v;
       else if (!strcmp(a, "--console")) console = v;
       else if (!strcmp(a, "--console-max")) consoleMax = v.longLongValue;
@@ -930,6 +979,31 @@ int main(int argc, const char **argv) {
       VZVirtioFileSystemDeviceConfiguration *fs = [[VZVirtioFileSystemDeviceConfiguration alloc] initWithTag:@"kido"];
       fs.share = [[VZMultipleDirectoryShare alloc] initWithDirectories:shares];
       config.directorySharingDevices = @[ fs ];
+    }
+
+    if (hasGPUMemory && !useGPU) {
+      fprintf(stderr, "kido-vmm: --gpu-memory requires --gpu\n");
+      return 2;
+    }
+    if (useGPU) {
+#if defined(__MAC_27_0)
+      if (@available(macOS 27.0, *)) {
+        uint64_t limitBytes = hasGPUMemory ? ((uint64_t)gpuMemoryMB << 20) : 0;
+        gMetalDevice = [[KidoMetalDevice alloc] initWithMemoryLimitBytes:limitBytes error:&error];
+        if (!gMetalDevice) {
+          fprintf(stderr, "kido-vmm: --gpu: %s\n", error.localizedDescription.UTF8String);
+          return 1;
+        }
+        config.customVirtioDevices = @[ [gMetalDevice makeConfiguration] ];
+      } else {
+        fprintf(stderr, "kido-vmm: --gpu requires macOS 27 or later\n");
+        return 2;
+      }
+#else
+      (void)gpuMemoryMB;
+      fprintf(stderr, "kido-vmm: --gpu requires building with macOS 27 SDK or later\n");
+      return 2;
+#endif
     }
 
     if (![config validateWithError:&error]) {

@@ -20,6 +20,18 @@ func vmnetSupported() error {
 	return nil
 }
 
+func gpuSupported() error {
+	v, err := unix.Sysctl("kern.osproductversion")
+	if err != nil {
+		return err
+	}
+	major, _, _ := strings.Cut(v, ".")
+	if n, err := strconv.Atoi(major); err != nil || n < 27 {
+		return fmt.Errorf("--gpu requires macOS 27 or later (this is %s)", v)
+	}
+	return nil
+}
+
 func processRunning(comm string) bool {
 	procs, err := unix.SysctlKinfoProcSlice("kern.proc.all")
 	if err != nil {

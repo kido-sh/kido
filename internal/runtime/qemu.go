@@ -75,6 +75,20 @@ func (r *Runtime) prepare(ctx context.Context, opts engine.CreateOptions) (*Info
 	if opts.MemoryMB < 256 || opts.MemoryMB > 65536 {
 		return nil, fmt.Errorf("--memory %d: must be between 256 and 65536 MB", opts.MemoryMB)
 	}
+	if opts.GPUMemoryMB != 0 && !opts.GPU {
+		return nil, errors.New("--gpu-memory requires --gpu")
+	}
+	if opts.GPU {
+		if r.Backend != backendVZ {
+			return nil, errors.New("--gpu requires the vz backend on macOS 27 or later")
+		}
+		if err := gpuSupported(); err != nil {
+			return nil, err
+		}
+		if opts.GPUMemoryMB != 0 && (opts.GPUMemoryMB < 64 || opts.GPUMemoryMB > 131072) {
+			return nil, fmt.Errorf("--gpu-memory %d: must be between 64 and 131072 MB", opts.GPUMemoryMB)
+		}
+	}
 	if opts.Network == "default" || opts.Network == "bridge" {
 		opts.Network = ""
 	}
@@ -112,6 +126,8 @@ func (r *Runtime) prepare(ctx context.Context, opts engine.CreateOptions) (*Info
 		info.Network = opts.Network
 		info.CPUs = opts.CPUs
 		info.MemoryMB = opts.MemoryMB
+		info.GPU = opts.GPU
+		info.GPUMemoryMB = opts.GPUMemoryMB
 		info.Labels = opts.Labels
 		info.Backend = r.Backend
 		if info.Backend != backendVZ || info.Network == "" {
