@@ -5,6 +5,9 @@
 // port forwarding, so the helper proxies each TCP connection, or each UDP client with udp:, to the
 // guest's address.
 // --network FILE attaches the VM to a vmnet network (macOS 26+) that `kido-vmm hold-network` owns.
+// --notify-fd N with --watch DIR ... writes a record for each FSEvents event under the DIRs to the
+// pipe at descriptor N, for kido's notify relay (notify.h).
+#import <CoreServices/CoreServices.h>
 #import <Foundation/Foundation.h>
 #import <Virtualization/Virtualization.h>
 #import <vmnet/vmnet.h>
@@ -25,6 +28,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <xpc/xpc.h>
+
+#include "notify.h"
 
 static NSDate *gStarted;
 static NSString *gStateFile;
@@ -579,6 +584,124 @@ static VZNetworkDeviceAttachment *vmnetAttachment(NSString *path) {
   return [[VZVmnetNetworkDeviceAttachment alloc] initWithNetwork:network];
 }
 
+// MARK: notifications
+
+// Everything here runs on gNotifyQueue, never on the main queue that runs the VM and the signals.
+// The write source owns the pipe and the queue: its cancel handler closes and frees them.
+static dispatch_queue_t gNotifyQueue;
+static notifyq *gNotify;
+static dispatch_source_t gNotifyWrite;
+static bool gNotifyArmed, gNotifyStopping;
+static FSEventStreamRef gNotifyStream;
+static char gNotifyPath[NOTIFY_MAX_PATH];
+
+enum { notifyMaxPerCallback = 4096 };
+
+// notifyStop never runs inside the stream's callback, which must return before the stream goes.
+static void notifyStop(void) {
+  if (gNotifyStream) {
+    FSEventStreamStop(gNotifyStream);
+    FSEventStreamInvalidate(gNotifyStream);
+    FSEventStreamRelease(gNotifyStream);
+    gNotifyStream = NULL;
+  }
+  if (gNotifyWrite) {
+    dispatch_source_cancel(gNotifyWrite);
+    if (!gNotifyArmed) dispatch_resume(gNotifyWrite);
+    gNotifyWrite = NULL;
+  }
+}
+
+static void notifyPump(void) {
+  if (!gNotifyWrite || gNotifyStopping) return;
+  int r = notifyq_drain(gNotify);
+  if (r < 0) {
+    logf_("notifications stopped: the relay is gone");
+    gNotifyStopping = true;
+    if (gNotifyArmed) {
+      dispatch_suspend(gNotifyWrite);
+      gNotifyArmed = false;
+    }
+    dispatch_async(gNotifyQueue, ^{
+      notifyStop();
+    });
+  } else if (r == 1 && !gNotifyArmed) {
+    dispatch_resume(gNotifyWrite);
+    gNotifyArmed = true;
+  } else if (r == 0 && gNotifyArmed) {
+    dispatch_suspend(gNotifyWrite);
+    gNotifyArmed = false;
+  }
+}
+
+// notifyEvents queues each event's path as the file system gives it; anything it cannot take as it
+// is becomes a flush, which costs the guest its cache, never a wrong answer.
+static void notifyEvents(ConstFSEventStreamRef stream, void *info, size_t n, void *paths,
+                         const FSEventStreamEventFlags flags[], const FSEventStreamEventId ids[]) {
+  if (!gNotifyWrite || gNotifyStopping) return;
+  CFTypeRef events = paths;
+  if (n > notifyMaxPerCallback || !events || CFGetTypeID(events) != CFArrayGetTypeID() ||
+      (size_t)CFArrayGetCount(events) < n) {
+    notifyq_flush(gNotify);
+  } else {
+    for (size_t i = 0; i < n; i++) {
+      CFTypeRef ev = CFArrayGetValueAtIndex(events, (CFIndex)i);
+      bool dict = ev && CFGetTypeID(ev) == CFDictionaryGetTypeID();
+      CFTypeRef path = dict ? CFDictionaryGetValue(ev, kFSEventStreamEventExtendedDataPathKey) : NULL;
+      CFTypeRef idref = dict ? CFDictionaryGetValue(ev, kFSEventStreamEventExtendedFileIDKey) : NULL;
+      SInt64 fileid = 0;
+      if (idref && CFGetTypeID(idref) == CFNumberGetTypeID()) CFNumberGetValue(idref, kCFNumberSInt64Type, &fileid);
+      // The bytes as stored, not the decomposed form CFStringGetFileSystemRepresentation gives: the guest
+      // knows each name as the host's server stores it.
+      CFIndex len = path && CFGetTypeID(path) == CFStringGetTypeID() ? CFStringGetLength(path) : -1, used = 0;
+      if (len < 0 || CFStringGetBytes(path, CFRangeMake(0, len), kCFStringEncodingUTF8, 0, false, (UInt8 *)gNotifyPath,
+                                      sizeof(gNotifyPath), &used) != len) {
+        notifyq_flush(gNotify);
+        continue;
+      }
+      notifyq_event(gNotify, (uint32_t)flags[i], (uint64_t)fileid, gNotifyPath, (size_t)used);
+    }
+  }
+  notifyPump();
+}
+
+// notifyStart takes fd: on failure too, it is closed by the time this returns or soon after.
+static bool notifyStart(int fd, NSArray<NSString *> *roots) {
+  gNotifyQueue = dispatch_queue_create("kido-vmm.notify", DISPATCH_QUEUE_SERIAL);
+  gNotify = fcntl(fd, F_SETFD, FD_CLOEXEC) == 0 ? notifyq_new(fd, 1 << 20) : NULL;
+  FSEventStreamContext ctx = {0};
+  gNotifyStream = gNotify ? FSEventStreamCreate(NULL, notifyEvents, &ctx, (__bridge CFArrayRef)roots,
+                                                kFSEventStreamEventIdSinceNow, 0.01,
+                                                kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagNoDefer |
+                                                    kFSEventStreamCreateFlagUseCFTypes |
+                                                    kFSEventStreamCreateFlagUseExtendedData |
+                                                    kFSEventStreamCreateFlagWatchRoot)
+                          : NULL;
+  gNotifyWrite = gNotifyStream ? dispatch_source_create(DISPATCH_SOURCE_TYPE_WRITE, (uintptr_t)fd, 0, gNotifyQueue) : NULL;
+  if (!gNotifyWrite) {
+    if (gNotifyStream) FSEventStreamRelease(gNotifyStream);
+    gNotifyStream = NULL;
+    notifyq_free(gNotify);
+    gNotify = NULL;
+    close(fd);
+    return false;
+  }
+  dispatch_source_set_event_handler(gNotifyWrite, ^{
+    notifyPump();
+  });
+  dispatch_source_set_cancel_handler(gNotifyWrite, ^{
+    notifyq_free(gNotify);
+    gNotify = NULL;
+    close(fd);
+  });
+  FSEventStreamSetDispatchQueue(gNotifyStream, gNotifyQueue);
+  if (FSEventStreamStart(gNotifyStream)) return true;
+  dispatch_async(gNotifyQueue, ^{
+    notifyStop();
+  });
+  return false;
+}
+
 // MARK: VM
 
 @interface Watcher : NSObject <VZVirtualMachineDelegate>
@@ -612,7 +735,7 @@ static void usage(void) {
                   "               [--mac MAC] [--console FILE [--console-max BYTES]] [--state-file FILE] [--disk-sync full|fsync|none]\n"
                   "               [--network FILE] [--forward tcp|udp:HOSTIP:HOSTPORT:GUESTIP:GUESTPORT ...]\n"
                   "               [--extra-disk RAW ...] [--extra-disk-ro RAW ...]\n"
-                  "               [--share NAME=DIR ...] [--share-ro NAME=DIR ...]\n"
+                  "               [--share NAME=DIR ...] [--share-ro NAME=DIR ...] [--notify-fd N --watch DIR ...]\n"
                   "       kido-vmm hold-network --subnet A.B.C.D/N [--host-only] --network FILE --users FILE\n");
   exit(2);
 }
@@ -647,6 +770,8 @@ int main(int argc, const char **argv) {
     NSMutableArray<NSString *> *extraDisks = [NSMutableArray array];
     NSMutableArray<NSNumber *> *extraReadOnly = [NSMutableArray array];
     NSMutableDictionary<NSString *, VZSharedDirectory *> *shares = [NSMutableDictionary dictionary];
+    NSMutableArray<NSString *> *watch = [NSMutableArray array];
+    int notifyFD = -1;
     for (int i = 1; i < argc; i++) {
       const char *a = argv[i];
       if (i + 1 >= argc) usage();
@@ -684,6 +809,19 @@ int main(int argc, const char **argv) {
         }
         shares[name] = [[VZSharedDirectory alloc] initWithURL:[NSURL fileURLWithPath:dir]
                                                      readOnly:strcmp(a, "--share-ro") == 0];
+      } else if (!strcmp(a, "--notify-fd")) {
+        notifyFD = v.intValue;
+        struct stat st;
+        if (notifyFD < 3 || fstat(notifyFD, &st) != 0 || !S_ISFIFO(st.st_mode)) {
+          fprintf(stderr, "kido-vmm: bad --notify-fd %s: not a pipe\n", v.UTF8String);
+          return 2;
+        }
+      } else if (!strcmp(a, "--watch")) {
+        if (![v hasPrefix:@"/"]) {
+          fprintf(stderr, "kido-vmm: bad --watch %s: not an absolute path\n", v.UTF8String);
+          return 2;
+        }
+        [watch addObject:v];
       } else if (!strcmp(a, "--forward")) {
         forward_t *f = parseForward(v.UTF8String);
         if (!f) {
@@ -694,6 +832,8 @@ int main(int argc, const char **argv) {
       } else usage();
     }
     if (!kernel || !initrd || !disk || !cmdlineFile) usage();
+    if (notifyFD >= 0 && !watch.count) close(notifyFD);
+    else if (notifyFD >= 0 && !notifyStart(notifyFD, watch)) logf_("notifications off");
 
     NSError *error = nil;
     NSString *cmdline = [NSString stringWithContentsOfFile:cmdlineFile encoding:NSUTF8StringEncoding error:&error];

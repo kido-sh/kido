@@ -43,7 +43,7 @@ DIST_NAME    := kido-$(VERSION)-darwin-arm64
 DIST_ROOT    := $(DISTDIR)/$(DIST_NAME)
 DIST_TAR     := $(DISTDIR)/$(DIST_NAME).tar.gz
 
-.PHONY: all build sign dist sign-dist install uninstall test vet clean help FORCE
+.PHONY: all build sign dist sign-dist install uninstall test test-vmm vet clean help FORCE
 
 all: build
 
@@ -66,10 +66,10 @@ $(OUT)/kido-agent: $(GO_SOURCES) $(OUT)/.version
 endif
 
 # The Virtualization.framework helper; `make sign` gives it com.apple.security.virtualization.
-$(OUT)/kido-vmm: vmm/kido-vmm.m
+$(OUT)/kido-vmm: vmm/kido-vmm.m vmm/notify.c vmm/notify.h
 	@mkdir -p $(OUT)
 	xcrun clang -fobjc-arc -O2 -Wall -Wextra -Wno-unused-parameter -mmacosx-version-min=13.0 \
-	  -framework Foundation -framework Virtualization -framework vmnet -o $@ $<
+	  -framework CoreServices -framework Foundation -framework Virtualization -framework vmnet -o $@ vmm/kido-vmm.m vmm/notify.c
 
 sign: build
 	@set -e; for name in $(BINARIES); do \
@@ -126,7 +126,7 @@ uninstall:
 	rm -f $(BINDIR)/kido $(LIBEXECDIR)/kido-agent $(LIBEXECDIR)/kido-vmm $(DOCDIR)/README.md $(DOCDIR)/LICENSE
 	-rmdir $(LIBEXECDIR) $(DOCDIR) 2>/dev/null
 
-test:
+test: test-vmm
 	$(GO) test ./...
 
 vet:
@@ -145,3 +145,9 @@ help:
 	@echo "make test | vet   go test ./... | go vet ./..."
 	@echo "make clean        remove $(OUT)/ and $(DISTDIR)/"
 	@echo "OUT=DIR DISTDIR=DIR put builds and archives elsewhere; DEV_QEMU=PATH keeps a fallback QEMU"
+
+# notify.c's tests, with the address and undefined-behaviour sanitizers.
+test-vmm:
+	@mkdir -p $(OUT)
+	xcrun clang -O1 -g -Wall -Wextra -fsanitize=address,undefined -o $(OUT)/notify_test vmm/notify_test.c vmm/notify.c
+	$(OUT)/notify_test
