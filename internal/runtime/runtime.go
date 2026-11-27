@@ -304,6 +304,9 @@ func (r *Runtime) Update(id string, fn func(*Info)) error {
 // Get returns the full state of a container.
 func (r *Runtime) Get(ref string) (*Info, error) { return r.Resolve(ref) }
 
+// Mounts returns the mounts recorded for container id.
+func (r *Runtime) Mounts(id string) ([]mount.Mounted, error) { return mount.List(r.dir(id)) }
+
 func (r *Runtime) List(ctx context.Context, all bool) ([]*engine.Container, error) {
 	infos, err := r.all()
 	if err != nil {

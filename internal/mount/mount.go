@@ -70,15 +70,25 @@ func Save(dir string, ms []engine.Mount, live bool) error {
 	return save(dir, st)
 }
 
+// Mounted is a recorded mount and how it reaches the container: Mode is "live" or "copy".
+type Mounted struct {
+	engine.Mount
+	Mode string `json:"mode"`
+}
+
 // List returns the mounts recorded for the container in dir.
-func List(dir string) ([]engine.Mount, error) {
+func List(dir string) ([]Mounted, error) {
 	st, err := load(dir)
 	if st == nil {
 		return nil, err
 	}
-	var out []engine.Mount
+	var out []Mounted
 	for _, m := range st.Mounts {
-		out = append(out, m.Mount)
+		mode := "copy"
+		if m.Live {
+			mode = "live"
+		}
+		out = append(out, Mounted{m.Mount, mode})
 	}
 	return out, nil
 }

@@ -300,3 +300,31 @@ func TestApplyAfterTheSourceFileWasRemoved(t *testing.T) {
 		t.Fatalf("Apply kept nothing of the container's file; warned %q", warn.String())
 	}
 }
+
+func TestListShowsEachMountsMode(t *testing.T) {
+	base := t.TempDir()
+	src := filepath.Join(base, "src")
+	os.MkdirAll(src, 0o700)
+	file := filepath.Join(base, "f")
+	write(t, file, "x")
+	for _, live := range []bool{true, false} {
+		dir := t.TempDir()
+		if err := Save(dir, []engine.Mount{{Source: src, Target: "/data"}, {Source: file, Target: "/etc/f"}}, live); err != nil {
+			t.Fatal(err)
+		}
+		ms, err := List(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []string{"copy", "copy"}
+		if live {
+			want[0] = "live"
+		}
+		if len(ms) != 2 || ms[0].Target != "/data" || ms[0].Mode != want[0] || ms[1].Mode != want[1] {
+			t.Fatalf("live %v: List = %+v, want modes %q", live, ms, want)
+		}
+	}
+	if ms, err := List(t.TempDir()); ms != nil || err != nil {
+		t.Fatalf("List without mounts = %v, %v", ms, err)
+	}
+}

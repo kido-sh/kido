@@ -5,10 +5,19 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+
+	"github.com/kido-sh/kido/internal/mount"
+	"github.com/kido-sh/kido/internal/runtime"
 )
 
 func init() {
 	register("inspect", "Return low-level information on containers or images (JSON)", ctrInspect)
+}
+
+// ctrInspected is a container as inspect shows it: its state and its mounts.
+type ctrInspected struct {
+	*runtime.Info
+	Mounts []mount.Mounted `json:"mounts,omitempty"`
 }
 
 func ctrInspect(ctx context.Context, args []string) int {
@@ -35,7 +44,12 @@ func ctrInspect(ctx context.Context, args []string) int {
 	for _, ref := range fs.Args() {
 		if *typ != "image" {
 			if info, err := rt.Get(ref); err == nil {
-				out = append(out, info)
+				ms, err := rt.Mounts(info.ID)
+				if err != nil {
+					code = ctrFail(err)
+					continue
+				}
+				out = append(out, ctrInspected{info, ms})
 				continue
 			} else if *typ == "container" {
 				code = ctrFail(err)
