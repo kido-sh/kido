@@ -1,0 +1,7 @@
+[target.aarch64-apple-darwin]
+rustflags = [
+  "-C", "target-cpu=apple-a10",
+  "-C", "link-arg=-Wl,-dead_strip_dylibs",
+  "--cfg", "aes_armv8",
+  "--cfg", "polyval_armv8",
+]
