@@ -1,9 +1,9 @@
 // Package build runs a Kidofile against an engine.Engine.
 //
-// Supported: FROM (one local image, no multi-stage), RUN, COPY, ADD, ENV, ARG, WORKDIR, USER, CMD,
-// ENTRYPOINT, LABEL and EXPOSE (recorded in the kido.expose label). ADD takes local sources only:
-// URLs are refused and a local tar archive is copied as a file, not unpacked. Sources are read from
-// the build context only, and .kidoignore is honoured.
+// Supported: multi-stage FROM [AS NAME], RUN, COPY [--from=STAGE|INDEX|IMAGE], ADD, ENV, ARG,
+// WORKDIR, USER, CMD, ENTRYPOINT, LABEL and EXPOSE (recorded in the kido.expose label). ADD takes
+// local sources only: URLs are refused and a local tar archive is copied as a file, not unpacked.
+// Host COPY and ADD read from the build context only, and .kidoignore is honoured.
 package build
 
 import (

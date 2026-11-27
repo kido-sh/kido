@@ -234,7 +234,7 @@ check  "rm -f udp container"    0 "$kido" rm -f e2e-u
 checko "run without IMAGE"    125 "\"kido run\" requires at least 1 argument." "$kido" run
 check  "no full help for it"    0 sh -c '! "$1" run 2>&1 | grep -q Options:' sh "$kido"
 checko "build without PATH"   125 "requires exactly 1 argument" "$kido" build -t x
-checko "build --help"           0 "--no-cache" "$kido" build --help
+checko "build --help"           0 "--target" "$kido" build --help
 checko "pull unknown flag"    125 "unknown flag: --bogus" "$kido" pull --bogus x
 mkdir -p "$KIDO_HOME/ctx" && printf 'FROM darwin\nRUN echo hi > /hi\n' > "$KIDO_HOME/ctx/Kidofile"
 checko "build prints the tag"   0 "Successfully tagged e2e-b:1" "$kido" build -t e2e-b:1 "$KIDO_HOME/ctx"
@@ -242,6 +242,24 @@ check  "build -q prints the ID" 0 sh -c 'id=$("$1" build -q -t e2e-b:2 "$2") && 
 printf 'FROM darwin\nRUN echo alt > /alt\n' > "$KIDO_HOME/ctx/Alt.kidofile"
 checko "build -f alternate"     0 "Successfully tagged e2e-b:3" "$kido" build -f "$KIDO_HOME/ctx/Alt.kidofile" -t e2e-b:3 "$KIDO_HOME/ctx"
 check  "rmi built images"       0 "$kido" rmi e2e-b:1 e2e-b:2 e2e-b:3
+mkdir -p "$KIDO_HOME/msctx"
+cat > "$KIDO_HOME/msctx/Kidofile" <<'EOF'
+FROM darwin AS builder
+RUN mkdir -p /out && echo built-artifact > /out/artifact.txt && echo secret > /builder-only.txt
+
+FROM darwin AS unused
+RUN exit 1
+
+FROM darwin
+COPY --from=builder /out/artifact.txt /app/artifact.txt
+COPY --from=0 /out/ /copied-dir/
+EOF
+checko "build multistage"       0 "Successfully tagged e2e-ms:final" "$kido" build -t e2e-ms:final "$KIDO_HOME/msctx"
+checko "multistage artifact"    0 "built-artifact" "$kido" run --rm e2e-ms:final /bin/sh -c 'cat /app/artifact.txt && cat /copied-dir/artifact.txt && test ! -e /builder-only.txt'
+checko "build --target builder" 0 "Successfully tagged e2e-ms:builder" "$kido" build --target builder -t e2e-ms:builder "$KIDO_HOME/msctx"
+checko "target builder state"   0 "secret" "$kido" run --rm e2e-ms:builder /bin/sh -c 'cat /builder-only.txt && test ! -e /app/artifact.txt'
+check  "multistage no leaks"    0 sh -c 'test -z "$("$1" ps -aq)" && ! "$1" images --format "{{.Repository}}" | grep -q kido-build-stage' sh "$kido"
+check  "rmi multistage images"  0 "$kido" rmi e2e-ms:final e2e-ms:builder
 checko "completion help eval"   0 'eval "$(kido completion bash)"' "$kido" completion --help
 start=$(python3 -c 'import time; print(time.time())')
 "$kido" run --rm darwin /bin/true >/dev/null 2>&1

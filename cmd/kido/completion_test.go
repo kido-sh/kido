@@ -21,6 +21,7 @@ func TestCompletionBash(t *testing.T) {
 		"kido st":           "start stop",
 		"kido image l":      "load ls",
 		"kido run --na":     "--name",
+		"kido build --tar":  "--target",
 		"kido run --name ":  "",
 		"kido stop ":        "web db",
 		"kido rmi ":         "darwin:latest alpine:3",

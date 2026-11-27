@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"os"
 	"path"
 	"regexp"
 	"slices"
@@ -27,6 +28,7 @@ type Options struct {
 	ContextDir string
 	Kidofile   []byte // nil: the Kidofile at the root of the context
 	Tag        string // NAME[:TAG] of the result; build-<random>:latest when empty
+	Target     string // optional stage name to stop at
 	BuildArgs  map[string]string
 	NoRm       bool // keep the build container
 	CPUs       int
@@ -111,25 +113,30 @@ func Build(ctx context.Context, eng engine.Engine, opts Options) (*engine.Image,
 	if err != nil {
 		return nil, err
 	}
-	steps, err := plan(insts)
+	p, err := plan(insts)
 	if err != nil {
 		return nil, err
 	}
+	var nonceBytes [6]byte
+	rand.Read(nonceBytes[:])
+	nonce := hex.EncodeToString(nonceBytes[:])
 	tag := opts.Tag
 	if tag == "" {
-		var id [6]byte
-		rand.Read(id[:])
-		tag = "build-" + hex.EncodeToString(id[:])
+		tag = "build-" + nonce
 	}
 	target, err := imageref.Parse(tag)
 	if err != nil {
 		return nil, err
 	}
 	b := &builder{
-		eng: eng, opts: opts, cx: cx, out: opts.Stdout, errw: opts.Stderr, target: target, steps: steps,
+		eng: eng, opts: opts, cx: cx, out: opts.Stdout, errw: opts.Stderr, target: target,
+		plan: p, nonce: nonce,
 		global: map[string]*string{}, args: map[string]*string{}, usedArgs: map[string]bool{},
+		stageImages: map[int]string{}, stageConfigs: map[int]engine.ImageConfig{},
+		stagedCopies: map[copyKey]stagedCopy{}, extractedImages: map[imageref.Ref]bool{},
 	}
 	for k, v := range platformArgs {
+		v := v
 		b.global[k] = &v
 	}
 	return b.build(ctx)
@@ -137,15 +144,16 @@ func Build(ctx context.Context, eng engine.Engine, opts Options) (*engine.Image,
 
 type step struct {
 	Instruction
-	argv  []string          // RUN, CMD, ENTRYPOINT, with the shell form wrapped in /bin/sh -c
-	words []string          // FROM: the image; COPY, ADD: sources, then the destination; EXPOSE: ports
-	pairs []kv              // ENV, LABEL, ARG
-	flags map[string]string // validated --name=value flags
+	argv      []string          // RUN, CMD, ENTRYPOINT, with the shell form wrapped in /bin/sh -c
+	words     []string          // FROM: the image; COPY, ADD: sources, then the destination; EXPOSE: ports
+	pairs     []kv              // ENV, LABEL, ARG
+	flags     map[string]string // validated --name=value flags
+	stageName string            // FROM: optional AS stage name
 }
 
 var stepFlags = map[string][]string{
 	"FROM": {"platform"},
-	"COPY": {"chown", "chmod", "link"},
+	"COPY": {"from", "chown", "chmod", "link"},
 	"ADD":  {"chown", "chmod", "link"},
 }
 
@@ -161,31 +169,58 @@ func checkSource(cmd, src string) error {
 }
 
 // plan checks the whole Kidofile before any VM starts.
-func plan(insts []Instruction) ([]*step, error) {
+func plan(insts []Instruction) (*buildPlan, error) {
 	if len(insts) == 0 {
 		return nil, errors.New("the Kidofile has no instructions")
 	}
-	steps := make([]*step, 0, len(insts))
-	from := false
+	p := &buildPlan{byName: map[string]int{}}
+	var cur *stage
 	for _, in := range insts {
 		s := &step{Instruction: in, flags: map[string]string{}}
 		if err := s.parse(); err != nil {
 			return nil, fmt.Errorf("line %d: %s: %w", in.Line, in.Cmd, err)
 		}
 		switch {
-		case s.Cmd == "FROM" && from:
-			return nil, fmt.Errorf("line %d: FROM: multi-stage builds are not supported", in.Line)
 		case s.Cmd == "FROM":
-			from = true
-		case !from && s.Cmd != "ARG":
+			idx := len(p.stages)
+			if s.stageName != "" {
+				if _, dup := p.byName[s.stageName]; dup {
+					return nil, fmt.Errorf("line %d: FROM: duplicate stage name %q", in.Line, s.stageName)
+				}
+				if isAllDigits(s.stageName) && s.stageName != strconv.Itoa(idx) {
+					return nil, fmt.Errorf("line %d: FROM: stage name %q conflicts with stage index", in.Line, s.stageName)
+				}
+				p.byName[s.stageName] = idx
+			}
+			cur = &stage{index: idx, name: s.stageName, from: s}
+			p.stages = append(p.stages, cur)
+		case cur == nil && s.Cmd == "ARG":
+			p.globalArgs = append(p.globalArgs, s)
+		case cur == nil:
 			return nil, fmt.Errorf("line %d: %s before FROM: only ARG may come first", in.Line, s.Cmd)
+		default:
+			cur.steps = append(cur.steps, s)
 		}
-		steps = append(steps, s)
 	}
-	if !from {
+	if len(p.stages) == 0 {
 		return nil, errors.New("the Kidofile has no FROM instruction")
 	}
-	return steps, nil
+	for _, st := range p.stages {
+		for _, s := range st.steps {
+			rawFrom, ok := s.flags["from"]
+			if !ok || strings.Contains(rawFrom, "$") {
+				continue
+			}
+			v, err := expandWord(rawFrom, unset)
+			if err != nil {
+				return nil, fmt.Errorf("line %d: %s: %w", s.Line, s.Cmd, err)
+			}
+			if _, err := resolveCopyFromRef(p, st.index, v); err != nil {
+				return nil, fmt.Errorf("line %d: %s: %w", s.Line, s.Cmd, err)
+			}
+		}
+	}
+	return p, nil
 }
 
 func (s *step) parse() error {
@@ -199,8 +234,6 @@ func (s *step) parse() error {
 	for _, f := range s.Flags {
 		name, value, hasValue := strings.Cut(strings.TrimPrefix(f, "--"), "=")
 		switch {
-		case name == "from" && (s.Cmd == "COPY" || s.Cmd == "ADD"):
-			return errors.New("--from is not supported: kido build has no multi-stage builds")
 		case !slices.Contains(stepFlags[s.Cmd], name):
 			return fmt.Errorf("flag --%s is not supported", name)
 		case name == "link":
@@ -220,11 +253,20 @@ func (s *step) parse() error {
 	var err error
 	switch s.Cmd {
 	case "FROM":
-		s.words = strings.Fields(args)
+		fields := strings.Fields(args)
 		switch {
-		case len(s.words) == 1:
-		case len(s.words) == 3 && strings.EqualFold(s.words[1], "AS"):
-			s.words = s.words[:1]
+		case len(fields) == 1:
+			s.words = fields
+		case len(fields) == 3 && strings.EqualFold(fields[1], "AS"):
+			name := fields[2]
+			if name == "scratch" {
+				return errors.New(`stage name "scratch" is reserved`)
+			}
+			if !stageNameRE.MatchString(name) || len(name) > 255 {
+				return fmt.Errorf("invalid stage name %q: must start with a lowercase letter or digit and contain only lowercase letters, digits, '.', '_' or '-'", name)
+			}
+			s.words = fields[:1]
+			s.stageName = name
 		default:
 			return errors.New("want FROM IMAGE [AS NAME]")
 		}
@@ -259,6 +301,7 @@ func (s *step) parse() error {
 			return errors.New("requires at least two arguments: SOURCE... DEST")
 		}
 		s.words = words
+		_, isFrom := s.flags["from"]
 		for _, w := range words[:len(words)-1] {
 			if strings.Contains(w, "$") {
 				continue
@@ -267,7 +310,11 @@ func (s *step) parse() error {
 			if err != nil {
 				return err
 			}
-			if err := checkSource(s.Cmd, v); err != nil {
+			if isFrom {
+				if _, _, err := cleanStageSource(v); err != nil {
+					return err
+				}
+			} else if err := checkSource(s.Cmd, v); err != nil {
 				return err
 			}
 		}
@@ -323,7 +370,23 @@ type builder struct {
 	out    io.Writer
 	errw   io.Writer
 	target imageref.Ref
-	steps  []*step
+	plan   *buildPlan
+	nonce  string
+
+	targetStageIdx  int
+	selected        []*stage
+	fromRefs        map[int]stageRef
+	copyFromRefs    map[copyKey]stageRef
+	needCommit      map[int]bool
+	baseImages      map[imageref.Ref]*engine.Image
+	stageCopies     map[int][]copyTask
+	imageCopies     map[imageref.Ref][]copyTask
+	stagedCopies    map[copyKey]stagedCopy
+	extractedImages map[imageref.Ref]bool
+	stageImages     map[int]string
+	stageConfigs    map[int]engine.ImageConfig
+	tempImages      []string
+	stageDir        string
 
 	global   map[string]*string // ARGs declared before FROM; nil: declared without a value
 	args     map[string]*string // ARGs declared after FROM
@@ -331,26 +394,55 @@ type builder struct {
 	usedArgs map[string]bool
 	inStage  bool
 
-	cfg    engine.ImageConfig
-	cmdSet bool
-	id     string // build container
+	cfg     engine.ImageConfig
+	cmdSet  bool
+	id      string // active build container
+	idImage string // image of active build container
 }
 
 func (b *builder) build(ctx context.Context) (img *engine.Image, err error) {
 	defer b.cleanup(ctx)
-	n := len(b.steps)
-	for i, s := range b.steps {
-		fmt.Fprintf(b.out, "Step %d/%d : %s\n", i+1, n, s.Original)
-		if err := b.dispatch(ctx, s); err != nil {
-			if se, ok := errors.AsType[*StepError](err); ok {
-				se.Step, se.Steps, se.Line, se.Instruction = i+1, n, s.Line, s.Original
-				return nil, se
-			}
-			return nil, fmt.Errorf("step %d/%d (line %d) %s: %w", i+1, n, s.Line, s.Cmd, err)
-		}
+	if err := b.resolvePlan(ctx); err != nil {
+		return nil, err
 	}
-	if img, err = b.eng.Commit(ctx, b.id, b.target.String(), b.cfg); err != nil {
-		return nil, fmt.Errorf("commit %s: %w", b.target, err)
+	n := len(b.plan.globalArgs)
+	for _, st := range b.selected {
+		n += 1 + len(st.steps)
+	}
+	stepNo := 0
+	for _, s := range b.plan.globalArgs {
+		stepNo++
+		fmt.Fprintf(b.out, "Step %d/%d : %s\n", stepNo, n, s.Original)
+	}
+	for _, st := range b.selected {
+		if err := b.extractExternalImagesForStage(ctx, st); err != nil {
+			return nil, err
+		}
+		stepNo++
+		fmt.Fprintf(b.out, "Step %d/%d : %s\n", stepNo, n, st.from.Original)
+		if err := b.startStage(ctx, st); err != nil {
+			return nil, fmt.Errorf("step %d/%d (line %d) FROM: %w", stepNo, n, st.from.Line, err)
+		}
+		for j, s := range st.steps {
+			stepNo++
+			fmt.Fprintf(b.out, "Step %d/%d : %s\n", stepNo, n, s.Original)
+			if err := b.dispatch(ctx, st.index, j, s); err != nil {
+				if se, ok := errors.AsType[*StepError](err); ok {
+					se.Step, se.Steps, se.Line, se.Instruction = stepNo, n, s.Line, s.Original
+					return nil, se
+				}
+				return nil, fmt.Errorf("step %d/%d (line %d) %s: %w", stepNo, n, s.Line, s.Cmd, err)
+			}
+		}
+		if st.index != b.targetStageIdx {
+			if err := b.finishIntermediateStage(ctx, st); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if img, err = b.eng.Commit(ctx, b.id, b.target.String(), b.cfg); err != nil {
+			return nil, fmt.Errorf("commit %s: %w", b.target, err)
+		}
 	}
 	var unused []string
 	for k := range b.opts.BuildArgs {
@@ -366,30 +458,97 @@ func (b *builder) build(ctx context.Context) (img *engine.Image, err error) {
 	return img, nil
 }
 
-func (b *builder) cleanup(ctx context.Context) {
+func (b *builder) finishIntermediateStage(ctx context.Context, st *stage) error {
+	if tasks := b.stageCopies[st.index]; len(tasks) > 0 {
+		if err := b.extractTasksFromContainer(ctx, b.id, tasks); err != nil {
+			return err
+		}
+	}
+	if b.needCommit[st.index] {
+		stageImg := fmt.Sprintf("kido-build-stage-%s-%d:latest", b.nonce, st.index)
+		if _, err := b.eng.Commit(ctx, b.id, stageImg, b.cfg); err != nil {
+			return fmt.Errorf("commit stage %d: %w", st.index, err)
+		}
+		b.tempImages = append(b.tempImages, stageImg)
+		b.stageImages[st.index] = stageImg
+		b.stageConfigs[st.index] = cloneImageConfig(b.cfg)
+	}
+	b.removeActiveContainer(ctx)
+	return ctx.Err()
+}
+
+func cloneImageConfig(cfg engine.ImageConfig) engine.ImageConfig {
+	out := engine.ImageConfig{
+		Entrypoint: slices.Clone(cfg.Entrypoint),
+		Cmd:        slices.Clone(cfg.Cmd),
+		Env:        slices.Clone(cfg.Env),
+		WorkingDir: cfg.WorkingDir,
+		User:       cfg.User,
+		Labels:     map[string]string{},
+	}
+	for k, v := range cfg.Labels {
+		out.Labels[k] = v
+	}
+	return out
+}
+
+func (b *builder) removeActiveContainer(ctx context.Context) {
 	if b.id == "" {
 		return
 	}
-	if b.opts.NoRm {
-		fmt.Fprintf(b.errw, "Keeping build container %s\n", b.id)
-		return
-	}
+	id := b.id
+	b.id, b.idImage = "", ""
 	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
 	defer cancel()
-	if err := b.eng.Remove(cctx, b.id, true); err != nil {
-		fmt.Fprintf(b.errw, "kido build: removing build container %s: %v\n", b.id, err)
+	if err := b.eng.Remove(cctx, id, true); err != nil {
+		fmt.Fprintf(b.errw, "kido build: removing build container %s: %v\n", id, err)
 	}
 }
 
-func (b *builder) dispatch(ctx context.Context, s *step) error {
+func (b *builder) cleanup(ctx context.Context) {
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+	defer cancel()
+	keptImage := ""
+	if b.id != "" {
+		if b.opts.NoRm {
+			fmt.Fprintf(b.errw, "Keeping build container %s\n", b.id)
+			keptImage = b.idImage
+		} else {
+			if err := b.eng.Remove(cctx, b.id, true); err != nil {
+				fmt.Fprintf(b.errw, "kido build: removing build container %s: %v\n", b.id, err)
+			}
+			b.id, b.idImage = "", ""
+		}
+	}
+	for i := len(b.tempImages) - 1; i >= 0; i-- {
+		img := b.tempImages[i]
+		if img == keptImage {
+			fmt.Fprintf(b.errw, "Keeping stage image %s for build container %s\n", img, b.id)
+			continue
+		}
+		if err := b.eng.RemoveImage(cctx, img); err != nil {
+			fmt.Fprintf(b.errw, "kido build: removing stage image %s: %v\n", img, err)
+		}
+	}
+	b.tempImages = nil
+	if b.stageDir != "" {
+		os.RemoveAll(b.stageDir)
+		b.stageDir = ""
+	}
+}
+
+func (b *builder) dispatch(ctx context.Context, stageIdx, stepIdx int, s *step) error {
 	switch s.Cmd {
 	case "ARG":
 		return b.arg(s)
-	case "FROM":
-		return b.from(ctx, s)
 	case "RUN":
 		return b.run(ctx, s)
-	case "COPY", "ADD":
+	case "COPY":
+		if _, ok := s.flags["from"]; ok {
+			return b.copyFrom(ctx, s, copyKey{stageIdx, stepIdx})
+		}
+		return b.copy(ctx, s)
+	case "ADD":
 		return b.copy(ctx, s)
 	case "ENV":
 		return b.env(s)
@@ -509,76 +668,36 @@ func (b *builder) localImage(ctx context.Context, ref imageref.Ref) (*engine.Ima
 	return nil, nil
 }
 
-func (b *builder) from(ctx context.Context, s *step) error {
+func (b *builder) startStage(ctx context.Context, st *stage) error {
 	b.inStage = true
-	if p, ok := s.flags["platform"]; ok {
-		v, err := expandWord(p, b.globalLookup)
-		if err != nil {
-			return err
-		}
-		if !strings.EqualFold(v, "darwin/arm64") {
-			return fmt.Errorf("--platform=%s: kido builds darwin/arm64 images only", v)
-		}
+	b.args = map[string]*string{}
+	b.argOrder = nil
+	b.cmdSet = false
+
+	fref := b.fromRefs[st.index]
+	var imageRef string
+	var baseCfg engine.ImageConfig
+	if fref.kind == refStage {
+		imageRef = b.stageImages[fref.stageIndex]
+		baseCfg = b.stageConfigs[fref.stageIndex]
+	} else {
+		imageRef = fref.image.String()
+		baseCfg = b.baseImages[fref.image].Config
 	}
-	name, err := expandWord(s.words[0], b.globalLookup)
-	if err != nil {
-		return err
-	}
-	if base, _, _ := strings.Cut(name, ":"); base == "scratch" {
-		return errors.New("FROM scratch is not supported: a kido image needs a Darwin userland, start from a local image such as darwin")
-	}
-	ref, err := imageref.Parse(name)
-	if err != nil {
-		return err
-	}
-	if ref == b.target {
-		return fmt.Errorf("the image being built, %s, is also its base image: choose another -t", ref)
-	}
-	base, err := b.localImage(ctx, ref)
-	if err != nil {
-		return err
-	}
-	if base == nil && b.opts.Pull != nil {
-		if err := b.opts.Pull(ctx, ref.String()); err != nil {
-			return err
-		}
-		if base, err = b.localImage(ctx, ref); err != nil {
-			return err
-		}
-	}
-	if base == nil {
-		return fmt.Errorf("image %s not found", ref)
-	}
-	// Other tools write image configs too; a bad user or directory must not reach the guest helpers.
-	if u := base.Config.User; u != "" && !ownerRE.MatchString(u) {
-		return fmt.Errorf("image %s has an invalid user %q", ref, u)
-	}
-	if wd := base.Config.WorkingDir; strings.ContainsRune(wd, 0) {
-		return fmt.Errorf("image %s has an invalid working directory %q", ref, wd)
-	}
-	b.cfg = engine.ImageConfig{
-		Entrypoint: slices.Clone(base.Config.Entrypoint),
-		Cmd:        slices.Clone(base.Config.Cmd),
-		Env:        slices.Clone(base.Config.Env),
-		User:       base.Config.User,
-		Labels:     map[string]string{},
-	}
-	if wd := base.Config.WorkingDir; wd != "" {
-		b.cfg.WorkingDir = path.Join("/", wd)
-	}
-	for k, v := range base.Config.Labels {
-		b.cfg.Labels[k] = v
+	b.cfg = cloneImageConfig(baseCfg)
+	if b.cfg.WorkingDir != "" {
+		b.cfg.WorkingDir = path.Join("/", b.cfg.WorkingDir)
 	}
 	if _, ok := envLookup(b.cfg.Env, "PATH"); !ok {
 		b.cfg.Env = append(b.cfg.Env, "PATH="+defaultPath)
 	}
 	c, err := b.eng.Create(ctx, engine.CreateOptions{
-		Image: ref.String(), CPUs: b.opts.CPUs, MemoryMB: b.opts.MemoryMB,
+		Image: imageRef, CPUs: b.opts.CPUs, MemoryMB: b.opts.MemoryMB,
 		Labels: map[string]string{BuildLabel: b.target.String()},
 	})
-	// Create can fail after the container exists (a boot that times out or is interrupted).
 	if c != nil {
 		b.id = c.ID
+		b.idImage = imageRef
 	}
 	if err != nil {
 		return err
@@ -868,6 +987,17 @@ func (b *builder) copyIn(ctx context.Context, entries []entry, dir string, chmod
 // under the agent's line limit. Symlinks are skipped: the guest's chown has no -h and would change
 // what they point to, which may be anything in the image.
 func (b *builder) chown(ctx context.Context, owner, dir string, entries []entry) error {
+	relPaths := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.info.Mode()&fs.ModeSymlink != 0 {
+			continue
+		}
+		relPaths = append(relPaths, e.name)
+	}
+	return b.chownPaths(ctx, owner, dir, relPaths)
+}
+
+func (b *builder) chownPaths(ctx context.Context, owner, dir string, relPaths []string) error {
 	const budget = 48 << 10 // of JSON, against the 64 KiB proto.MaxLine
 	var paths []string
 	size := 0
@@ -879,11 +1009,8 @@ func (b *builder) chown(ctx context.Context, owner, dir string, entries []entry)
 		paths, size = nil, 0
 		return err
 	}
-	for _, e := range entries {
-		if e.info.Mode()&fs.ModeSymlink != 0 {
-			continue
-		}
-		p := path.Join(dir, e.name)
+	for _, rel := range relPaths {
+		p := path.Join(dir, rel)
 		paths = append(paths, p)
 		q, _ := json.Marshal(p)
 		if size += len(q) + 1; size >= budget {
@@ -903,7 +1030,11 @@ func (b *builder) mkdir(ctx context.Context, dir, owner, mode string) error {
 }
 
 func (b *builder) isDir(ctx context.Context, p string) (bool, error) {
-	status, err := b.eng.Exec(ctx, b.id, engine.ProcessSpec{Args: []string{"/bin/test", "-d", p}}, engine.Stdio{})
+	return b.isDirIn(ctx, b.id, p)
+}
+
+func (b *builder) isDirIn(ctx context.Context, containerID, p string) (bool, error) {
+	status, err := b.eng.Exec(ctx, containerID, engine.ProcessSpec{Args: []string{"/bin/test", "-d", p}}, engine.Stdio{})
 	if err != nil {
 		return false, err
 	}

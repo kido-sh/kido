@@ -21,11 +21,12 @@ func init() {
 
 const buildUsage = `[OPTIONS] PATH
 
-Runs in a build VM started from the FROM image. kido pulls that image first if it is not here.
-Instructions: FROM (one image, no scratch, no multi-stage), RUN, COPY, ADD, ENV, ARG,
-WORKDIR, USER, CMD, ENTRYPOINT, LABEL, EXPOSE (kept in the kido.expose label).
-COPY and ADD read from PATH only and honour .kidoignore. ADD takes local files only:
-URLs are refused, and a local tar archive is copied as a file, not unpacked.
+Runs each stage in a build VM started from its FROM image or an earlier stage. kido pulls
+missing base images first.
+Instructions: FROM [AS NAME] (no scratch), RUN, COPY [--from=STAGE|INDEX|IMAGE], ADD,
+ENV, ARG, WORKDIR, USER, CMD, ENTRYPOINT, LABEL, EXPOSE (kept in the kido.expose label).
+COPY (without --from) and ADD read from PATH only and honour .kidoignore. ADD takes local
+files only: URLs are refused, and a local tar archive is copied as a file, not unpacked.
 Exit status: that of the failing RUN step, or 125 for any other error.`
 
 // buildOutput passes the builder's output through, holding back a write that is a whole
@@ -62,13 +63,14 @@ func buildMain(ctx context.Context, args []string) int {
 	fs.Var(&tags, "tag", "name and optional tag of the image, NAME[:TAG]")
 	file := fs.String("f", "", "the Kidofile (default PATH/Kidofile, - reads standard input)")
 	fs.StringVar(file, "file", "", "the Kidofile (default PATH/Kidofile, - reads standard input)")
+	target := fs.String("target", "", "set the target build stage to build")
 	fs.Var(&buildArgs, "build-arg", "set a build-time variable KEY=VALUE, or KEY to take its value from the environment")
 	noRm := fs.Bool("no-rm", false, "keep the build container")
 	rm := fs.Bool("rm", true, "remove the build container when the build ends")
 	quiet := fs.Bool("q", false, "suppress the build output and print the image ID on success")
 	fs.BoolVar(quiet, "quiet", false, "suppress the build output and print the image ID on success")
 	fs.Bool("no-cache", false, "accepted, but kido has no build cache and runs every step")
-	fs.Bool("pull", false, "accepted, but kido pulls a FROM image only when it is missing and never looks for a newer one")
+	fs.Bool("pull", false, "accepted, but kido pulls missing FROM and COPY --from images only and never looks for a newer one")
 	cpus := fs.Int("cpus", 0, "virtual CPUs of the build VM (default 2)")
 	memory := fs.String("memory", "", "memory of the build VM in MB, or with an m/g suffix (default 1024)")
 	fs.StringVar(memory, "m", "", "memory of the build VM (same as --memory)")
@@ -96,7 +98,7 @@ func buildMain(ctx context.Context, args []string) int {
 		out.w = io.Discard
 	}
 	opts := build.Options{
-		ContextDir: contextDir, NoRm: *noRm || !*rm, CPUs: *cpus, MemoryMB: mem,
+		ContextDir: contextDir, Target: *target, NoRm: *noRm || !*rm, CPUs: *cpus, MemoryMB: mem,
 		Stdout: out, Stderr: os.Stderr, BuildArgs: map[string]string{},
 	}
 	if len(tags) == 1 {

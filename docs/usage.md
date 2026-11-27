@@ -93,6 +93,34 @@ Containers keep `/tmp` across stop, start and commit. `-u` and a Kidofile `USER`
 uid, with or without a passwd entry. `kido login`, `kido push` and `kido pull` keep registry
 credentials in `~/.docker/config.json`.
 
+## Multi-stage builds
+
+A Kidofile can define several stages with `FROM IMAGE AS NAME` and copy finished artifacts from an
+earlier stage into a clean runtime image with `COPY --from=NAME` or `COPY --from=INDEX`. You can
+also inherit directly from an earlier stage with `FROM NAME`, or copy files from another local or
+remote image with `COPY --from=IMAGE`. `.kidoignore` applies only to files copied from the host
+build context, not to `COPY --from`.
+
+```
+FROM darwin AS builder
+WORKDIR /src
+COPY . .
+RUN /bin/sh build.sh
+
+FROM darwin
+COPY --from=builder /src/out/mytool /usr/local/bin/mytool
+ENTRYPOINT ["/usr/local/bin/mytool"]
+```
+
+```console
+$ kido build -t mytool .
+$ kido build --target builder -t mytool-builder .
+```
+
+`--target NAME` stops after building the named stage. Stages that are not needed to build the
+target stage are skipped, and temporary stage containers and images are removed when the build
+ends.
+
 ## Backends
 
 - **Virtualization.framework** (the default): `kido-vmm` runs each VM on an APFS clone of the
@@ -213,7 +241,7 @@ Copy mounts (files, and directories on QEMU, with an image without the label or 
 | `export` | Write a container's file system as a tar archive (`-o FILE`, or stdout). A stopped container boots without its command for this. Sockets and device nodes are skipped with a warning |
 | `cp` | Copy files between a container and the host (`SRC CONTAINER:DST`, `CONTAINER:SRC DST`) |
 | `ps`, `logs`, `inspect`, `port`, `rename`, `rm` | List, read the output (`logs --console`: the serial console; `--tail`), inspect (JSON), ports, rename, remove |
-| `build` | Build an image from a Kidofile (honouring `.kidoignore`): FROM, RUN, COPY, ADD (local files only, archives not unpacked), ENV, ARG, WORKDIR, USER, ENTRYPOINT, CMD, LABEL, EXPOSE. No SHELL and no multi-stage builds. `-q` prints only the image ID. `--no-cache` and `--pull` are accepted, but kido has no build cache and does not look for a newer FROM image |
+| `build` | Build an image from a Kidofile (honouring `.kidoignore`): multi-stage `FROM [AS NAME]`, `RUN`, `COPY [--from=STAGE|INDEX|IMAGE]`, `ADD` (local files only, archives not unpacked), `ENV`, `ARG`, `WORKDIR`, `USER`, `ENTRYPOINT`, `CMD`, `LABEL`, `EXPOSE`. No `SHELL`. `--target` builds up to a named stage. `-q` prints only the image ID. `--no-cache` and `--pull` are accepted, but kido has no build cache and does not look for a newer FROM image |
 | `commit` | Create an image from a container's disk |
 | `images`, `rmi`, `tag`, `save`, `load` | List, remove and tag images; save them to and load them from an OCI-layout tar archive |
 | `history` | An image's parent chain: ID, created, created-by and comment when recorded, size (`-H --no-trunc -q --format`) |
