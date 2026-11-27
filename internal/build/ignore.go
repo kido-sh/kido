@@ -15,7 +15,7 @@ type ignorePattern struct {
 	exclusion bool
 }
 
-// ignoreMatcher implements .dockerignore: patterns relative to the context root, "*" and "?" stay
+// ignoreMatcher implements .kidoignore: patterns relative to the context root, "*" and "?" stay
 // within one path element, "**" spans any number of them, "!" re-includes, the last match wins, and a
 // path is excluded when it or one of its parent directories matches.
 type ignoreMatcher struct {
@@ -44,7 +44,7 @@ func parseIgnore(r io.Reader) (*ignoreMatcher, error) {
 		if exclusion {
 			line = strings.TrimSpace(line[1:])
 			if line == "" {
-				return nil, fmt.Errorf(".dockerignore: illegal exclusion pattern %q", "!")
+				return nil, fmt.Errorf(".kidoignore: illegal exclusion pattern %q", "!")
 			}
 		}
 		line = path.Clean(line)
@@ -53,7 +53,7 @@ func parseIgnore(r io.Reader) (*ignoreMatcher, error) {
 		}
 		re, err := compileIgnore(line)
 		if err != nil {
-			return nil, fmt.Errorf(".dockerignore: pattern %q: %w", line, err)
+			return nil, fmt.Errorf(".kidoignore: pattern %q: %w", line, err)
 		}
 		m.patterns = append(m.patterns, ignorePattern{re: re, exclusion: exclusion})
 		m.hasExclusions = m.hasExclusions || exclusion

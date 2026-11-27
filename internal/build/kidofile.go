@@ -1,9 +1,9 @@
-// Package build runs a Dockerfile subset against an engine.Engine.
+// Package build runs a Kidofile against an engine.Engine.
 //
 // Supported: FROM (one local image, no multi-stage), RUN, COPY, ADD, ENV, ARG, WORKDIR, USER, CMD,
 // ENTRYPOINT, LABEL and EXPOSE (recorded in the kido.expose label). ADD takes local sources only:
 // URLs are refused and a local tar archive is copied as a file, not unpacked. Sources are read from
-// the build context only; .dockerignore is honoured.
+// the build context only, and .kidoignore is honoured.
 package build
 
 import (
@@ -17,7 +17,7 @@ import (
 	"unicode"
 )
 
-// Instruction is one Dockerfile instruction with its continuation lines joined.
+// Instruction is one Kidofile instruction with its continuation lines joined.
 type Instruction struct {
 	Line     int      // 1-based line the instruction starts on
 	Cmd      string   // upper-case keyword
@@ -31,7 +31,7 @@ var (
 	directiveRE    = regexp.MustCompile(`^#\s*([a-zA-Z][a-zA-Z0-9]*)\s*=\s*(.+?)\s*$`)
 )
 
-// Parse splits a Dockerfile into instructions. It knows nothing about what each one means.
+// Parse splits a Kidofile into instructions. It knows nothing about what each one means.
 func Parse(r io.Reader) ([]Instruction, error) {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 64*1024), 4<<20)
@@ -144,7 +144,7 @@ func extractFlags(s string) ([]string, string) {
 	}
 }
 
-var errNotStringArray = errors.New("JSON arrays in a Dockerfile must contain only strings")
+var errNotStringArray = errors.New("JSON arrays in a Kidofile must contain only strings")
 
 // parseJSONArray reports whether s is the exec (JSON) form; a JSON array of non-strings is an error.
 func parseJSONArray(s string) ([]string, bool, error) {

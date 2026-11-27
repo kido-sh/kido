@@ -15,7 +15,7 @@ func init() {
 	register("commit", "Create a new image from a container's disk", ctrCommit)
 }
 
-// ctrInstrArgs parses a Dockerfile-style exec form (JSON array) or shell form.
+// ctrInstrArgs parses a Kidofile-style exec form (JSON array) or shell form.
 func ctrInstrArgs(s string) []string {
 	var arr []string
 	if strings.HasPrefix(strings.TrimSpace(s), "[") && json.Unmarshal([]byte(s), &arr) == nil {
@@ -64,7 +64,7 @@ func ctrChange(cfg *engine.ImageConfig, change string) error {
 func ctrCommit(ctx context.Context, args []string) int {
 	fs := ctrFlags("commit", "[-c INSTRUCTION] CONTAINER NAME[:TAG]")
 	var changes ctrList
-	fs.Var(&changes, "c", "apply a Dockerfile instruction to the image config (CMD, ENTRYPOINT, ENV, WORKDIR, USER, LABEL)")
+	fs.Var(&changes, "c", "apply a Kidofile instruction to the image config (CMD, ENTRYPOINT, ENV, WORKDIR, USER, LABEL)")
 	fs.Var(&changes, "change", "same as -c")
 	if err := fs.Parse(ctrInterspersed(fs, args)); err != nil {
 		return 125

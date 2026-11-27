@@ -16,15 +16,15 @@ import (
 )
 
 func init() {
-	register("build", "Build an image from a Dockerfile", buildMain)
+	register("build", "Build an image from a Kidofile", buildMain)
 }
 
 const buildUsage = `[OPTIONS] PATH
 
 Runs in a build VM started from the FROM image. kido pulls that image first if it is not here.
-Instructions: FROM (one image; no scratch, no multi-stage), RUN, COPY, ADD, ENV, ARG,
+Instructions: FROM (one image, no scratch, no multi-stage), RUN, COPY, ADD, ENV, ARG,
 WORKDIR, USER, CMD, ENTRYPOINT, LABEL, EXPOSE (kept in the kido.expose label).
-COPY and ADD read from PATH only and honour .dockerignore. ADD takes local files only:
+COPY and ADD read from PATH only and honour .kidoignore. ADD takes local files only:
 URLs are refused, and a local tar archive is copied as a file, not unpacked.
 Exit status: that of the failing RUN step, or 125 for any other error.`
 
@@ -60,8 +60,8 @@ func buildMain(ctx context.Context, args []string) int {
 	var tags, buildArgs ctrList
 	fs.Var(&tags, "t", "name and optional tag of the image, NAME[:TAG]")
 	fs.Var(&tags, "tag", "name and optional tag of the image, NAME[:TAG]")
-	file := fs.String("f", "", "the Dockerfile (default PATH/Dockerfile; - reads standard input)")
-	fs.StringVar(file, "file", "", "the Dockerfile (default PATH/Dockerfile; - reads standard input)")
+	file := fs.String("f", "", "the Kidofile (default PATH/Kidofile, - reads standard input)")
+	fs.StringVar(file, "file", "", "the Kidofile (default PATH/Kidofile, - reads standard input)")
 	fs.Var(&buildArgs, "build-arg", "set a build-time variable KEY=VALUE, or KEY to take its value from the environment")
 	noRm := fs.Bool("no-rm", false, "keep the build container")
 	rm := fs.Bool("rm", true, "remove the build container when the build ends")
@@ -117,14 +117,14 @@ func buildMain(ctx context.Context, args []string) int {
 	switch *file {
 	case "":
 	case "-":
-		if opts.Dockerfile, err = io.ReadAll(io.LimitReader(os.Stdin, 4<<20+1)); err == nil && len(opts.Dockerfile) > 4<<20 {
+		if opts.Kidofile, err = io.ReadAll(io.LimitReader(os.Stdin, 4<<20+1)); err == nil && len(opts.Kidofile) > 4<<20 {
 			err = errors.New("standard input holds more than 4 MiB")
 		}
 	default:
-		opts.Dockerfile, err = os.ReadFile(*file)
+		opts.Kidofile, err = os.ReadFile(*file)
 	}
 	if err != nil {
-		return buildFail(fmt.Errorf("Dockerfile: %w", err))
+		return buildFail(fmt.Errorf("Kidofile: %w", err))
 	}
 
 	rt, err := runtime.New(runtime.DefaultHome())

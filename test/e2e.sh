@@ -236,10 +236,12 @@ check  "no full help for it"    0 sh -c '! "$1" run 2>&1 | grep -q Options:' sh 
 checko "build without PATH"   125 "requires exactly 1 argument" "$kido" build -t x
 checko "build --help"           0 "--no-cache" "$kido" build --help
 checko "pull unknown flag"    125 "unknown flag: --bogus" "$kido" pull --bogus x
-mkdir -p "$KIDO_HOME/ctx" && printf 'FROM darwin\nRUN echo hi > /hi\n' > "$KIDO_HOME/ctx/Dockerfile"
+mkdir -p "$KIDO_HOME/ctx" && printf 'FROM darwin\nRUN echo hi > /hi\n' > "$KIDO_HOME/ctx/Kidofile"
 checko "build prints the tag"   0 "Successfully tagged e2e-b:1" "$kido" build -t e2e-b:1 "$KIDO_HOME/ctx"
 check  "build -q prints the ID" 0 sh -c 'id=$("$1" build -q -t e2e-b:2 "$2") && test "$id" = "sha256:$("$1" images -q --no-trunc e2e-b:2)"' sh "$kido" "$KIDO_HOME/ctx"
-check  "rmi built images"       0 "$kido" rmi e2e-b:1 e2e-b:2
+printf 'FROM darwin\nRUN echo alt > /alt\n' > "$KIDO_HOME/ctx/Alt.kidofile"
+checko "build -f alternate"     0 "Successfully tagged e2e-b:3" "$kido" build -f "$KIDO_HOME/ctx/Alt.kidofile" -t e2e-b:3 "$KIDO_HOME/ctx"
+check  "rmi built images"       0 "$kido" rmi e2e-b:1 e2e-b:2 e2e-b:3
 checko "completion help eval"   0 'eval "$(kido completion bash)"' "$kido" completion --help
 start=$(python3 -c 'import time; print(time.time())')
 "$kido" run --rm darwin /bin/true >/dev/null 2>&1

@@ -35,7 +35,7 @@ func OpenContext(dir string) (*Context, error) {
 		return nil, fmt.Errorf("build context: %w", err)
 	}
 	c := &Context{root: root}
-	data, err := c.ReadFile(".dockerignore")
+	data, err := c.ReadFile(".kidoignore")
 	switch {
 	case err == nil:
 		if c.ignore, err = parseIgnore(bytes.NewReader(data)); err != nil {
@@ -44,14 +44,14 @@ func OpenContext(dir string) (*Context, error) {
 		}
 	case !errors.Is(err, fs.ErrNotExist):
 		root.Close()
-		return nil, fmt.Errorf(".dockerignore: %w", err)
+		return nil, fmt.Errorf(".kidoignore: %w", err)
 	}
 	return c, nil
 }
 
 func (c *Context) Close() error { return c.root.Close() }
 
-// ReadFile reads a regular file of the context, such as .dockerignore or the default Dockerfile.
+// ReadFile reads a regular file of the context, such as .kidoignore or the default Kidofile.
 // A FIFO or a device fails instead of blocking the build.
 func (c *Context) ReadFile(name string) ([]byte, error) {
 	f, err := c.root.OpenFile(name, os.O_RDONLY|syscall.O_NONBLOCK, 0)
@@ -142,7 +142,7 @@ func (c *Context) resolve(src string) ([]source, error) {
 	return out, err
 }
 
-// realpath resolves every symlink in rel inside the context, so that .dockerignore applies to the
+// realpath resolves every symlink in rel inside the context, so that .kidoignore applies to the
 // file a path really names, and an ignored file is never sent.
 func (c *Context) realpath(rel string) (string, error) {
 	var done []string
@@ -207,7 +207,7 @@ func (c *Context) stat(rel string) (source, error) {
 	s := source{rel: real, base: path.Base(rel), info: fi}
 	if c.ignore.excluded(rel) || c.ignore.excluded(real) {
 		if !fi.IsDir() || !c.ignore.hasExclusions {
-			return source{}, fmt.Errorf("%s: excluded by .dockerignore", rel)
+			return source{}, fmt.Errorf("%s: excluded by .kidoignore", rel)
 		}
 		s.excluded = true
 	}
@@ -285,7 +285,7 @@ func (c *Context) entries(s source, name string) ([]entry, error) {
 		return nil, fmt.Errorf("%s: %w", s.rel, err)
 	}
 	if s.excluded && len(out) == 0 {
-		return nil, fmt.Errorf("%s: excluded by .dockerignore", s.rel)
+		return nil, fmt.Errorf("%s: excluded by .kidoignore", s.rel)
 	}
 	return out, nil
 }

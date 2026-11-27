@@ -52,10 +52,10 @@ hello
 $ kido rm -f box
 ```
 
-Put your own macOS tool in an image. This Dockerfile adds yq. The binary is yq's official macOS
+Put your own macOS tool in an image. This Kidofile adds yq. The binary is yq's official macOS
 arm64 release.
 
-```dockerfile
+```
 FROM darwin
 COPY yq /usr/local/bin/yq
 ENTRYPOINT ["/usr/local/bin/yq"]

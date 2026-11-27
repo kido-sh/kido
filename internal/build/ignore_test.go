@@ -72,10 +72,10 @@ func TestIgnoreDoubleStar(t *testing.T) {
 			t.Errorf("excluded(%q) != %v", p, want)
 		}
 	}
-	if _, err := parseIgnore(strings.NewReader("[ab\n")); err == nil {
-		t.Error("an unterminated class is an error")
+	if _, err := parseIgnore(strings.NewReader("[ab\n")); err == nil || !strings.Contains(err.Error(), ".kidoignore") {
+		t.Errorf("an unterminated class is an error: %v", err)
 	}
-	if _, err := parseIgnore(strings.NewReader("!\n")); err == nil {
-		t.Fatal("a lone ! is an error")
+	if _, err := parseIgnore(strings.NewReader("!\n")); err == nil || !strings.Contains(err.Error(), ".kidoignore") {
+		t.Fatalf("a lone ! is an error: %v", err)
 	}
 }

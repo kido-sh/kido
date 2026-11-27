@@ -89,7 +89,7 @@ kernel collection) and `image.json` (with the root file system's `"rootUUID"`).
     $ kido export -o box.tar box
     $ kido rm -f box
 
-Containers keep `/tmp` across stop, start and commit. `-u` and a Dockerfile `USER` may name any
+Containers keep `/tmp` across stop, start and commit. `-u` and a Kidofile `USER` may name any
 uid, with or without a passwd entry. `kido login`, `kido push` and `kido pull` keep registry
 credentials in `~/.docker/config.json`.
 
@@ -213,7 +213,7 @@ Copy mounts (files, and directories on QEMU, with an image without the label or 
 | `export` | Write a container's file system as a tar archive (`-o FILE`, or stdout). A stopped container boots without its command for this. Sockets and device nodes are skipped with a warning |
 | `cp` | Copy files between a container and the host (`SRC CONTAINER:DST`, `CONTAINER:SRC DST`) |
 | `ps`, `logs`, `inspect`, `port`, `rename`, `rm` | List, read the output (`logs --console`: the serial console; `--tail`), inspect (JSON), ports, rename, remove |
-| `build` | Build an image from a Dockerfile: FROM, RUN, COPY, ADD (local files only, archives not unpacked), ENV, ARG, WORKDIR, USER, ENTRYPOINT, CMD, LABEL, EXPOSE. No SHELL and no multi-stage builds. `-q` prints only the image ID. `--no-cache` and `--pull` are accepted, but kido has no build cache and does not look for a newer FROM image |
+| `build` | Build an image from a Kidofile (honouring `.kidoignore`): FROM, RUN, COPY, ADD (local files only, archives not unpacked), ENV, ARG, WORKDIR, USER, ENTRYPOINT, CMD, LABEL, EXPOSE. No SHELL and no multi-stage builds. `-q` prints only the image ID. `--no-cache` and `--pull` are accepted, but kido has no build cache and does not look for a newer FROM image |
 | `commit` | Create an image from a container's disk |
 | `images`, `rmi`, `tag`, `save`, `load` | List, remove and tag images; save them to and load them from an OCI-layout tar archive |
 | `history` | An image's parent chain: ID, created, created-by and comment when recorded, size (`-H --no-trunc -q --format`) |
@@ -262,7 +262,7 @@ its RUN step.
      |     QEMU: qemu-system-aarch64 -machine virt -accel hvf -kernel kernel -initrd initrd.cpio
      |           -drive disk.qcow2 (overlay on the image's disk.img)  -netdev user (NAT, hostfwd)
      |     VZ:   kido-vmm (Virtualization.framework, APFS clone of disk.img, vmnet)
-     |-- internal/build: Dockerfile subset on top of the engine (RUN in a build VM)
+     |-- internal/build: Kidofile builder on top of the engine (RUN in a build VM)
      |-- internal/mount: -v mounts, live over virtio-fs on VZ or copied through tar disks
      |-- internal/registry: OCI push/pull (zstd disk layer, image config, registry credentials)
      '-- internal/setup: QEMU download, verify, unpack, sign; kido doctor

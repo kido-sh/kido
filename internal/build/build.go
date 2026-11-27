@@ -25,7 +25,7 @@ import (
 // Options configures one build.
 type Options struct {
 	ContextDir string
-	Dockerfile []byte // nil: the Dockerfile at the root of the context
+	Kidofile   []byte // nil: the Kidofile at the root of the context
 	Tag        string // NAME[:TAG] of the result; build-<random>:latest when empty
 	BuildArgs  map[string]string
 	NoRm       bool // keep the build container
@@ -87,7 +87,7 @@ while [ ! -e "$d" ] && [ ! -L "$d" ]; do set -- "$@" "$d"; d=${d%/*}; [ -n "$d" 
 if [ -n "$mode" ] && [ $# -gt 0 ]; then /bin/chmod "$mode" "$dir" || exit 1; fi
 if [ -n "$owner" ] && [ $# -gt 0 ]; then /bin/chown "$owner" "$@"; fi`
 
-// Build runs the Dockerfile in a build container created from its FROM image and commits the
+// Build runs the Kidofile in a build container created from its FROM image and commits the
 // result. The build container is removed even when the build fails, unless NoRm is set.
 func Build(ctx context.Context, eng engine.Engine, opts Options) (*engine.Image, error) {
 	if opts.Stdout == nil {
@@ -101,13 +101,13 @@ func Build(ctx context.Context, eng engine.Engine, opts Options) (*engine.Image,
 		return nil, err
 	}
 	defer cx.Close()
-	df := opts.Dockerfile
-	if df == nil {
-		if df, err = cx.ReadFile("Dockerfile"); err != nil {
-			return nil, fmt.Errorf("Dockerfile: %w", err)
+	kf := opts.Kidofile
+	if kf == nil {
+		if kf, err = cx.ReadFile("Kidofile"); err != nil {
+			return nil, fmt.Errorf("Kidofile: %w", err)
 		}
 	}
-	insts, err := Parse(bytes.NewReader(df))
+	insts, err := Parse(bytes.NewReader(kf))
 	if err != nil {
 		return nil, err
 	}
@@ -160,10 +160,10 @@ func checkSource(cmd, src string) error {
 	return err
 }
 
-// plan checks the whole Dockerfile before any VM starts.
+// plan checks the whole Kidofile before any VM starts.
 func plan(insts []Instruction) ([]*step, error) {
 	if len(insts) == 0 {
-		return nil, errors.New("the Dockerfile has no instructions")
+		return nil, errors.New("the Kidofile has no instructions")
 	}
 	steps := make([]*step, 0, len(insts))
 	from := false
@@ -183,7 +183,7 @@ func plan(insts []Instruction) ([]*step, error) {
 		steps = append(steps, s)
 	}
 	if !from {
-		return nil, errors.New("the Dockerfile has no FROM instruction")
+		return nil, errors.New("the Kidofile has no FROM instruction")
 	}
 	return steps, nil
 }

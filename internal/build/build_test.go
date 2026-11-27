@@ -154,7 +154,7 @@ func runBuild(t *testing.T, f *fakeEngine, files map[string]string, df string, m
 	dir := t.TempDir()
 	writeTree(t, dir, files)
 	var out, errw bytes.Buffer
-	opts := Options{ContextDir: dir, Dockerfile: []byte(df), Tag: "myimg:1", Stdout: &out, Stderr: &errw}
+	opts := Options{ContextDir: dir, Kidofile: []byte(df), Tag: "myimg:1", Stdout: &out, Stderr: &errw}
 	if mod != nil {
 		mod(&opts)
 	}
@@ -292,7 +292,7 @@ func TestBuildCancelledStillRemoves(t *testing.T) {
 	f.onRun = cancel
 	f.execErr["sleep 100"] = context.Canceled
 	dir := t.TempDir()
-	_, err := Build(ctx, f, Options{ContextDir: dir, Dockerfile: []byte("FROM darwin\nRUN sleep 100\n"), Tag: "x"})
+	_, err := Build(ctx, f, Options{ContextDir: dir, Kidofile: []byte("FROM darwin\nRUN sleep 100\n"), Tag: "x"})
 	if !errors.Is(err, context.Canceled) || len(f.removed) != 1 {
 		t.Fatalf("err %v, removed %v", err, f.removed)
 	}
@@ -358,7 +358,7 @@ func TestBuildConfigInheritance(t *testing.T) {
 		t.Fatal(err)
 	}
 	if cfg := f.commits[0].cfg; !reflect.DeepEqual(cfg.Cmd, []string{"a"}) {
-		t.Errorf("a CMD of this Dockerfile survives ENTRYPOINT: %+v", cfg)
+		t.Errorf("a CMD of this Kidofile survives ENTRYPOINT: %+v", cfg)
 	}
 }
 
@@ -440,10 +440,10 @@ func TestBuildChownBatches(t *testing.T) {
 	}
 }
 
-func TestBuildDefaultDockerfileAndTag(t *testing.T) {
+func TestBuildDefaultKidofileAndTag(t *testing.T) {
 	f := newFake(t)
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte("FROM darwin\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "Kidofile"), []byte("FROM darwin\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	img, err := Build(context.Background(), f, Options{ContextDir: dir})
@@ -452,6 +452,56 @@ func TestBuildDefaultDockerfileAndTag(t *testing.T) {
 	}
 	if !strings.HasPrefix(img.Name, "build-") || !strings.HasSuffix(img.Name, ":latest") {
 		t.Fatalf("generated tag %q", img.Name)
+	}
+}
+
+func TestBuildPrefersKidofileOverDockerfile(t *testing.T) {
+	f := newFake(t)
+	dir := t.TempDir()
+	writeTree(t, dir, map[string]string{
+		"Kidofile":   "FROM darwin\nLABEL recipe=kidofile\n",
+		"Dockerfile": "FROM missing-linux-base\nLABEL recipe=dockerfile\n",
+	})
+	if _, err := Build(context.Background(), f, Options{ContextDir: dir, Tag: "coexist:1"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.commits[0].cfg.Labels["recipe"]; got != "kidofile" {
+		t.Fatalf("recipe label = %q, want kidofile", got)
+	}
+}
+
+func TestBuildNoFallbackToDockerfile(t *testing.T) {
+	f := newFake(t)
+	dir := t.TempDir()
+	writeTree(t, dir, map[string]string{
+		"Dockerfile": "FROM darwin\n",
+	})
+	_, err := Build(context.Background(), f, Options{ContextDir: dir, Tag: "missing:1"})
+	if err == nil || !strings.Contains(err.Error(), "Kidofile") || !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("got %v, want missing Kidofile error", err)
+	}
+	if len(f.created) != 0 {
+		t.Fatalf("created container without Kidofile: %v", f.created)
+	}
+}
+
+func TestBuildExplicitKidofile(t *testing.T) {
+	for _, name := range []string{"Custom.recipe", "Dockerfile"} {
+		f := newFake(t)
+		dir := t.TempDir()
+		writeTree(t, dir, map[string]string{
+			name: "FROM darwin\nLABEL recipe=" + name + "\n",
+		})
+		data, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Build(context.Background(), f, Options{ContextDir: dir, Kidofile: data, Tag: "explicit:1"}); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if got := f.commits[0].cfg.Labels["recipe"]; got != name {
+			t.Fatalf("%s: recipe label = %q, want %q", name, got, name)
+		}
 	}
 }
 
@@ -525,7 +575,7 @@ func TestBuildArgOverridesDefault(t *testing.T) {
 func TestBuildWorkdirAndCopyModes(t *testing.T) {
 	f := newFake(t)
 	dir := t.TempDir()
-	writeTree(t, dir, map[string]string{"secrets/k": "k", "f": "f", "Dockerfile": "FROM darwin\nUSER app\nWORKDIR /w\nCOPY secrets /secrets\nCOPY --chmod=750 secrets /s2\nCOPY f /files/\nUSER 1000\nWORKDIR /n\n"})
+	writeTree(t, dir, map[string]string{"secrets/k": "k", "f": "f", "Kidofile": "FROM darwin\nUSER app\nWORKDIR /w\nCOPY secrets /secrets\nCOPY --chmod=750 secrets /s2\nCOPY f /files/\nUSER 1000\nWORKDIR /n\n"})
 	if err := os.Chmod(filepath.Join(dir, "secrets"), 0o700); err != nil {
 		t.Fatal(err)
 	}

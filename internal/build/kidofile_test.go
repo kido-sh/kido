@@ -7,7 +7,7 @@ import (
 )
 
 func TestParse(t *testing.T) {
-	df := "# syntax=docker/dockerfile:1\n" +
+	kf := "# syntax=kido/kidofile:1\n" +
 		"# a comment\n" +
 		"from darwin AS base\n" +
 		"\n" +
@@ -20,7 +20,7 @@ func TestParse(t *testing.T) {
 		"   # indented comment\n" +
 		"CMD [\"/bin/hello\", \"world\"]\n" +
 		"RUN echo trailing \\\n"
-	insts, err := Parse(strings.NewReader(df))
+	insts, err := Parse(strings.NewReader(kf))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +122,8 @@ func TestPlanErrors(t *testing.T) {
 		{"FROM darwin\nFOO bar\n", "line 2: FOO: unknown instruction"},
 		{"FROM darwin\nHEALTHCHECK NONE\n", "line 2: HEALTHCHECK: not supported"},
 		{"RUN x\nFROM darwin\n", "line 1: RUN before FROM"},
-		{"ARG X\n", "no FROM"},
+		{"", "the Kidofile has no instructions"},
+		{"ARG X\n", "the Kidofile has no FROM instruction"},
 		{"FROM a\nFROM b\n", "line 2: FROM: multi-stage"},
 		{"FROM darwin\nRUN --mount=type=cache x\n", "line 2: RUN: flag --mount is not supported"},
 		{"FROM darwin\nCOPY --from=a x y\n", "--from is not supported"},
@@ -131,7 +132,7 @@ func TestPlanErrors(t *testing.T) {
 		{"FROM darwin\nENV A=${B\n", "line 2: ENV: syntax error: missing '}'"},
 		{"FROM darwin\nCOPY \"a b\" /x/\n", "matching double-quote"},
 		{"FROM darwin\nWORKDIR ${A:?x}\n", "unsupported modifier"},
-		{"FROM darwin\nCMD [\"a\", 1]\n", "only strings"},
+		{"FROM darwin\nCMD [\"a\", 1]\n", "JSON arrays in a Kidofile must contain only strings"},
 		{"FROM a b\n", "want FROM IMAGE"},
 		{"FROM darwin\nEXPOSE\n", "at least one argument"},
 	} {

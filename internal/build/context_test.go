@@ -78,7 +78,7 @@ func TestResolveRefusesEscapes(t *testing.T) {
 func TestResolveWildcard(t *testing.T) {
 	c, _ := openTestContext(t, map[string]string{
 		"a.go": "", "b.go": "", "c.txt": "", "sub/d.go": "", "sub/e.go": "", "ignored.go": "",
-		".dockerignore": "ignored.go\n",
+		".kidoignore": "ignored.go\n",
 	})
 	got, err := c.resolve("*.go")
 	if err != nil {
@@ -97,7 +97,7 @@ func TestResolveWildcard(t *testing.T) {
 	if got, err := c.resolve("*.rs"); err != nil || len(got) != 0 {
 		t.Fatalf("a wildcard may match nothing: %v %v", got, err)
 	}
-	if _, err := c.resolve("ignored.go"); err == nil || !strings.Contains(err.Error(), ".dockerignore") {
+	if _, err := c.resolve("ignored.go"); err == nil || !strings.Contains(err.Error(), ".kidoignore") {
 		t.Fatalf("an ignored source: %v", err)
 	}
 }
@@ -140,7 +140,7 @@ func TestEntriesAndTar(t *testing.T) {
 		"src/cache/x":        "x",
 		"src/cache/keep.txt": "k",
 		"src/notes.md":       "n",
-		".dockerignore":      "src/cache\n!src/cache/keep.txt\n*/*.md\n",
+		".kidoignore":        "src/cache\n!src/cache/keep.txt\n*/*.md\n",
 	})
 	if err := os.Chmod(filepath.Join(dir, "src/bin/tool"), 0o755|os.ModeSetuid); err != nil {
 		t.Fatal(err)
@@ -248,10 +248,10 @@ func TestSwappedSymlinkCannotEscape(t *testing.T) {
 func TestIgnoreAppliesThroughSymlinks(t *testing.T) {
 	c, _ := openTestContext(t, map[string]string{
 		".env": "SECRET", "link": "->.env", "secrets/key": "k", "alias": "->secrets", "ok": "x", "ok-link": "->ok",
-		".dockerignore": ".env\nsecrets\n",
+		".kidoignore": ".env\nsecrets\n",
 	})
 	for _, src := range []string{"link", "alias/key", "alias"} {
-		if got, err := c.resolve(src); err == nil || !strings.Contains(err.Error(), ".dockerignore") {
+		if got, err := c.resolve(src); err == nil || !strings.Contains(err.Error(), ".kidoignore") {
 			t.Errorf("resolve(%q) = %v, %v; want it excluded", src, got, err)
 		}
 	}
@@ -262,19 +262,19 @@ func TestIgnoreAppliesThroughSymlinks(t *testing.T) {
 }
 
 func TestExcludedDirWithUnrelatedExclusion(t *testing.T) {
-	c, _ := openTestContext(t, map[string]string{"cache/x": "x", "README.md": "r", ".dockerignore": "cache\n!README.md\n"})
+	c, _ := openTestContext(t, map[string]string{"cache/x": "x", "README.md": "r", ".kidoignore": "cache\n!README.md\n"})
 	srcs, err := c.resolve("cache")
 	if err == nil {
 		_, err = c.entries(srcs[0], "cache")
 	}
-	if err == nil || !strings.Contains(err.Error(), ".dockerignore") {
+	if err == nil || !strings.Contains(err.Error(), ".kidoignore") {
 		t.Fatalf("an ignored directory with nothing re-included: %v", err)
 	}
 }
 
 func TestFIFOsDoNotBlock(t *testing.T) {
 	dir := t.TempDir()
-	if err := syscall.Mkfifo(filepath.Join(dir, ".dockerignore"), 0o644); err != nil {
+	if err := syscall.Mkfifo(filepath.Join(dir, ".kidoignore"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	done := make(chan error, 1)
@@ -288,28 +288,51 @@ func TestFIFOsDoNotBlock(t *testing.T) {
 	select {
 	case err := <-done:
 		if err == nil {
-			t.Fatal("a FIFO .dockerignore must be refused")
+			t.Fatal("a FIFO .kidoignore must be refused")
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("OpenContext blocked on a FIFO")
 	}
 }
 
-func TestDockerignoreSymlinkOutside(t *testing.T) {
+func TestKidoignoreSymlinkOutside(t *testing.T) {
 	outside := t.TempDir()
 	writeTree(t, outside, map[string]string{"ignore": "*\n"})
 	dir := t.TempDir()
-	writeTree(t, dir, map[string]string{".dockerignore": "->" + filepath.Join(outside, "ignore")})
+	writeTree(t, dir, map[string]string{".kidoignore": "->" + filepath.Join(outside, "ignore")})
 	if c, err := OpenContext(dir); err == nil {
 		c.Close()
-		t.Fatal("a .dockerignore that points out of the context must not be read")
+		t.Fatal("a .kidoignore that points out of the context must not be read")
+	}
+}
+
+func TestIgnoresStrayDockerignore(t *testing.T) {
+	c, _ := openTestContext(t, map[string]string{
+		"keep.txt":      "k",
+		".dockerignore": "keep.txt\n",
+	})
+	if got, err := c.resolve("keep.txt"); err != nil || len(got) != 1 || got[0].rel != "keep.txt" {
+		t.Fatalf("stray .dockerignore must not be read: %v, %v", got, err)
+	}
+
+	c2, _ := openTestContext(t, map[string]string{
+		"keep.txt":      "k",
+		"drop.txt":      "d",
+		".dockerignore": "keep.txt\n",
+		".kidoignore":   "drop.txt\n",
+	})
+	if got, err := c2.resolve("keep.txt"); err != nil || len(got) != 1 || got[0].rel != "keep.txt" {
+		t.Fatalf("keep.txt must not be excluded by .dockerignore: %v, %v", got, err)
+	}
+	if _, err := c2.resolve("drop.txt"); err == nil || !strings.Contains(err.Error(), ".kidoignore") {
+		t.Fatalf("drop.txt must be excluded by .kidoignore: %v", err)
 	}
 }
 
 func TestExcludedDirWithReincludedFile(t *testing.T) {
 	c, _ := openTestContext(t, map[string]string{
 		"cache/x": "x", "cache/keep.txt": "k", "secret": "s",
-		".dockerignore": "cache\n!cache/keep.txt\nsecret\n",
+		".kidoignore": "cache\n!cache/keep.txt\nsecret\n",
 	})
 	srcs, err := c.resolve("cache")
 	if err != nil {
