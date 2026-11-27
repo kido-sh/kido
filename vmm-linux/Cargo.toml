@@ -1,0 +1,26 @@
+[package]
+name = "kido-vmm"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Native ARM64 Linux /dev/kvm VMM for KidoDarwin"
+
+[[bin]]
+name = "kido-vmm"
+path = "src/main.rs"
+
+[dependencies]
+libc = "0.2"
+smoltcp = { version = "0.14", default-features = false, features = ["std", "medium-ethernet", "proto-ipv4", "socket-tcp", "auto-icmp-echo-reply"] }
+vm-fdt = "0.3"
+
+[target.'cfg(all(target_os = "linux", target_arch = "aarch64"))'.dependencies]
+kvm-bindings = "0.14"
+kvm-ioctls = "0.25"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true
