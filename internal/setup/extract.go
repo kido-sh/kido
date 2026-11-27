@@ -2,6 +2,7 @@ package setup
 
 import (
 	"archive/tar"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"runtime"
 	"strings"
 )
 
@@ -21,8 +23,34 @@ const (
 	maxEntries     = 50000
 )
 
-// decompressor is macOS's FreeBSD-derived gzip, which also reads xz and bzip2 (Go has no xz).
-const decompressor = "/usr/bin/gzip"
+const darwinDecompressor = "/usr/bin/gzip"
+
+func decompressorFor(archive string, header []byte) string {
+	return decompressorForOS(runtime.GOOS, archive, header)
+}
+
+func decompressorForOS(goos, archive string, header []byte) string {
+	if goos == "darwin" {
+		return darwinDecompressor
+	}
+	switch {
+	case bytes.HasPrefix(header, []byte{0xfd, '7', 'z', 'X', 'Z', 0x00}):
+		return "xz"
+	case bytes.HasPrefix(header, []byte{0x1f, 0x8b}):
+		return "gzip"
+	case bytes.HasPrefix(header, []byte{'B', 'Z', 'h'}):
+		return "bzip2"
+	}
+	lower := strings.ToLower(archive)
+	switch {
+	case strings.HasSuffix(lower, ".xz"):
+		return "xz"
+	case strings.HasSuffix(lower, ".bz2"):
+		return "bzip2"
+	default:
+		return "gzip"
+	}
+}
 
 type unpackStats struct {
 	Files   int
@@ -38,9 +66,14 @@ func unpack(ctx context.Context, archive, dir string) (unpackStats, error) {
 		return unpackStats{}, err
 	}
 	defer f.Close()
+	var hdr [6]byte
+	n, _ := io.ReadFull(f, hdr[:])
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return unpackStats{}, err
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, decompressor, "-dc")
+	cmd := exec.CommandContext(ctx, decompressorFor(archive, hdr[:n]), "-dc")
 	cmd.Stdin = f
 	stderr := &tailBuffer{max: 4096}
 	cmd.Stderr = stderr

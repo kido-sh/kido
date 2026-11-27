@@ -51,15 +51,22 @@ _kido; echo "${COMPREPLY[*]}"`, "bash", dir, line)
 func TestCompletionScriptsParse(t *testing.T) {
 	dir := t.TempDir()
 	for shell, check := range map[string][]string{"bash": {"/bin/bash", "-n"}, "zsh": {"/bin/zsh", "-n"}} {
-		s, err := ctrCompletionScript(shell, ctrCompletionSpecs())
-		if err != nil {
-			t.Fatal(err)
-		}
-		f := filepath.Join(dir, shell)
-		os.WriteFile(f, []byte(s), 0o600)
-		if out, err := exec.Command(check[0], check[1], f).CombinedOutput(); err != nil {
-			t.Errorf("%s -n: %v: %s", shell, err, out)
-		}
+		t.Run(shell, func(t *testing.T) {
+			s, err := ctrCompletionScript(shell, ctrCompletionSpecs())
+			if err != nil {
+				t.Fatal(err)
+			}
+			f := filepath.Join(dir, shell)
+			if err := os.WriteFile(f, []byte(s), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(check[0]); err != nil {
+				t.Skipf("%s not installed", check[0])
+			}
+			if out, err := exec.Command(check[0], check[1], f).CombinedOutput(); err != nil {
+				t.Errorf("%s -n: %v: %s", shell, err, out)
+			}
+		})
 	}
 	fish, _ := ctrCompletionScript("fish", ctrCompletionSpecs())
 	for _, want := range []string{

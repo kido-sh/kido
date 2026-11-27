@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"testing"
 )
@@ -89,13 +90,20 @@ func tarball(t *testing.T, files map[string]string) []byte {
 }
 
 func releaseFiles(version string) map[string]string {
-	return map[string]string{
+	m := map[string]string{
 		"bin/kido":                 fakeKido(version),
 		"libexec/kido/kido-agent":  "agent " + version,
-		"libexec/kido/kido-vmm":    "vmm " + version,
 		"share/doc/kido/README.md": "readme " + version,
 		"share/doc/kido/LICENSE":   "license",
 	}
+	if goruntime.GOOS == "darwin" {
+		m["libexec/kido/kido-vmm"] = "vmm " + version
+	}
+	return m
+}
+
+func testTarballName(version string) string {
+	return "kido-" + version + "-" + goruntime.GOOS + "-" + goruntime.GOARCH + ".tar.gz"
 }
 
 type release struct {
@@ -109,7 +117,7 @@ func serve(t *testing.T, s signer, latest string, rels ...release) *httptest.Ser
 	t.Helper()
 	paths := map[string][]byte{}
 	for _, r := range rels {
-		name := "kido-" + r.version + "-darwin-arm64.tar.gz"
+		name := testTarballName(r.version)
 		tgz := tarball(t, r.files)
 		sum := sha256.Sum256(tgz)
 		sums := r.sums
@@ -191,7 +199,15 @@ func TestUpgrade(t *testing.T) {
 		t.Errorf("result %+v", res)
 	}
 	installed(t, prefix, releaseFiles("0.2.0"))
-	for name, mode := range map[string]os.FileMode{"bin/kido": 0o755, "libexec/kido/kido-vmm": 0o755, "share/doc/kido/LICENSE": 0o644} {
+	wantModes := map[string]os.FileMode{
+		"bin/kido":                0o755,
+		"libexec/kido/kido-agent": 0o755,
+		"share/doc/kido/LICENSE":  0o644,
+	}
+	if goruntime.GOOS == "darwin" {
+		wantModes["libexec/kido/kido-vmm"] = 0o755
+	}
+	for name, mode := range wantModes {
 		if fi, err := os.Stat(filepath.Join(prefix, name)); err != nil || fi.Mode().Perm() != mode {
 			t.Errorf("%s mode %v, %v; want %v", name, fi.Mode().Perm(), err, mode)
 		}
@@ -237,14 +253,18 @@ func TestExplicitVersion(t *testing.T) {
 func TestRefused(t *testing.T) {
 	s, other := newSigner(t), newSigner(t)
 	good := releaseFiles("0.2.0")
-	sums := []byte(strings.Repeat("0", 64) + "  kido-0.2.0-darwin-arm64.tar.gz\n")
+	sums := []byte(strings.Repeat("0", 64) + "  " + testTarballName("0.2.0") + "\n")
 	withEntry := func(name, body string) map[string]string {
 		m := releaseFiles("0.2.0")
 		m[name] = body
 		return m
 	}
+	missingHelper := "libexec/kido/kido-agent"
+	if goruntime.GOOS == "darwin" {
+		missingHelper = "libexec/kido/kido-vmm"
+	}
 	without := releaseFiles("0.2.0")
-	delete(without, "libexec/kido/kido-vmm")
+	delete(without, missingHelper)
 	broken := releaseFiles("0.2.0")
 	broken["bin/kido"] = fakeKido("0.1.9")
 	for _, c := range []struct {
@@ -257,7 +277,7 @@ func TestRefused(t *testing.T) {
 		{"checksum", release{version: "0.2.0", files: good, sums: sums}, "does not match its SHA-256"},
 		{"unexpected file", release{version: "0.2.0", files: withEntry("bin/other", "x")}, "unexpected entry"},
 		{"path escape", release{version: "0.2.0", files: withEntry("../evil", "x")}, "unexpected entry"},
-		{"missing helper", release{version: "0.2.0", files: without}, "no libexec/kido/kido-vmm"},
+		{"missing helper", release{version: "0.2.0", files: without}, "no " + missingHelper},
 		{"new kido reports another version", release{version: "0.2.0", files: broken}, "not version 0.2.0"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -378,5 +398,56 @@ func TestReleaseKey(t *testing.T) {
 	want := "release_key='" + strings.Join(strings.Fields(releaseKey)[:2], " ") + "'\n"
 	if !strings.Contains(string(script), "\n"+want) {
 		t.Errorf("install.sh does not set %s", strings.TrimSpace(want))
+	}
+}
+
+func TestLinuxTarballAndRequired(t *testing.T) {
+	darwinSum := strings.Repeat("a", 64)
+	linuxSum := strings.Repeat("b", 64)
+	sums := []byte(fmt.Sprintf("%s  kido-0.2.0-darwin-arm64.tar.gz\n%s  kido-0.2.0-linux-arm64.tar.gz\n%s  install.sh\n",
+		darwinSum, linuxSum, strings.Repeat("0", 64)))
+
+	name, ver, sum, err := pickTarballFor(sums, tarballPattern("linux", "arm64"))
+	if err != nil {
+		t.Fatalf("pickTarballFor linux/arm64: %v", err)
+	}
+	if name != "kido-0.2.0-linux-arm64.tar.gz" || ver != "0.2.0" || sum != linuxSum {
+		t.Fatalf("got (%q, %q, %q)", name, ver, sum)
+	}
+
+	name, ver, sum, err = pickTarballFor(sums, tarballPattern("darwin", "arm64"))
+	if err != nil || name != "kido-0.2.0-darwin-arm64.tar.gz" || ver != "0.2.0" || sum != darwinSum {
+		t.Fatalf("darwin/arm64: got (%q, %q, %q), %v", name, ver, sum, err)
+	}
+
+	linuxFiles := map[string]string{
+		"bin/kido":                 fakeKido("0.2.0"),
+		"libexec/kido/kido-agent":  "agent 0.2.0",
+		"share/doc/kido/README.md": "readme",
+		"share/doc/kido/LICENSE":   "license",
+	}
+	tgzPath := filepath.Join(t.TempDir(), "linux.tar.gz")
+	if err := os.WriteFile(tgzPath, tarball(t, linuxFiles), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	stagedFiles, err := stageFor(tgzPath, t.TempDir(), requiredFiles("linux"))
+	if err != nil {
+		t.Fatalf("stageFor linux without kido-vmm: %v", err)
+	}
+	if len(stagedFiles) != len(linuxFiles) {
+		t.Fatalf("staged %d files, want %d", len(stagedFiles), len(linuxFiles))
+	}
+	if _, err := stageFor(tgzPath, t.TempDir(), requiredFiles("darwin")); err == nil || !strings.Contains(err.Error(), "no libexec/kido/kido-vmm") {
+		t.Fatalf("darwin stage without kido-vmm: %v", err)
+	}
+
+	delete(linuxFiles, "libexec/kido/kido-agent")
+	noAgentPath := filepath.Join(t.TempDir(), "no-agent.tar.gz")
+	if err := os.WriteFile(noAgentPath, tarball(t, linuxFiles), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stageFor(noAgentPath, t.TempDir(), requiredFiles("linux")); err == nil || !strings.Contains(err.Error(), "no libexec/kido/kido-agent") {
+		t.Fatalf("linux stage without kido-agent: %v", err)
 	}
 }

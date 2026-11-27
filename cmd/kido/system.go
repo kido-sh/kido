@@ -6,9 +6,6 @@ import (
 	"os"
 	goruntime "runtime"
 	"runtime/debug"
-	"strings"
-
-	"golang.org/x/sys/unix"
 
 	"github.com/kido-sh/kido/internal/runtime"
 )
@@ -124,12 +121,10 @@ type ctrInfoData struct {
 	MemTotal          int64
 }
 
-func ctrSysctl(name string) string {
-	s, err := unix.Sysctl(name)
-	if err != nil {
-		return ""
-	}
-	return s
+type ctrHostInfo struct {
+	OperatingSystem string
+	KernelVersion   string
+	MemTotal        int64
 }
 
 func ctrInfo(ctx context.Context, args []string) int {
@@ -151,15 +146,14 @@ func ctrInfo(ctx context.Context, args []string) int {
 	if err != nil {
 		return ctrFail(err)
 	}
+	host := ctrReadHostInfo()
 	d := ctrInfoData{
 		Version: version, Backend: rt.Backend, BackendPath: ctrBackendPath(rt), RootDir: rt.Home,
 		Containers: u.Containers, ContainersRunning: u.Running, ContainersStopped: u.Containers - u.Running,
 		Images: u.Images, ImagesSize: u.ImageBytes, ContainersSize: u.ContainerBytes, FreeSpace: u.FreeBytes,
-		OperatingSystem: strings.TrimSpace("macOS " + ctrSysctl("kern.osproductversion")),
-		KernelVersion:   ctrSysctl("kern.osrelease"), Architecture: goruntime.GOARCH, NCPU: goruntime.NumCPU(),
-	}
-	if mem, err := unix.SysctlUint64("hw.memsize"); err == nil {
-		d.MemTotal = int64(mem)
+		OperatingSystem: host.OperatingSystem,
+		KernelVersion:   host.KernelVersion, Architecture: goruntime.GOARCH, NCPU: goruntime.NumCPU(),
+		MemTotal: host.MemTotal,
 	}
 	d.BackendVersion, _ = rt.BackendVersion(ctx)
 	if *format != "" {

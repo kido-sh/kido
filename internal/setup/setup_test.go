@@ -7,6 +7,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -193,16 +194,42 @@ func TestFindQEMUOrder(t *testing.T) {
 	DevQEMU = filepath.Join(t.TempDir(), "absent", qemuName)
 
 	t.Setenv("KIDO_QEMU", "")
+	t.Setenv("PATH", t.TempDir())
 	q, err := FindQEMU(home)
 	if err != ErrNoQEMU || q.Path != filepath.Join(home, "qemu", "current", "bin", qemuName) {
 		t.Fatalf("empty home: %+v, %v", q, err)
 	}
 
+	sysDir := t.TempDir()
+	sysQEMU := filepath.Join(sysDir, qemuName)
+	sysImg := filepath.Join(sysDir, qemuImgName)
+	writeExe(t, sysQEMU)
+	writeExe(t, sysImg)
+	t.Setenv("PATH", sysDir)
+	if q, err = findQEMUForOS("darwin", home); err != ErrNoQEMU || q.Path != filepath.Join(home, "qemu", "current", "bin", qemuName) {
+		t.Fatalf("darwin PATH should be ignored: %+v, %v", q, err)
+	}
+	if q, err = findQEMUForOS("linux", home); err != nil || q.Source != SourceSystem || q.Path != sysQEMU || q.Img != sysImg {
+		t.Fatalf("linux PATH fallback: %+v, %v", q, err)
+	}
+	if runtime.GOOS == "darwin" {
+		if q, err = FindQEMU(home); err != ErrNoQEMU {
+			t.Fatalf("FindQEMU on darwin with PATH QEMU: %+v, %v", q, err)
+		}
+	} else {
+		if q, err = FindQEMU(home); err != nil || q.Source != SourceSystem || q.Path != sysQEMU || q.Img != sysImg {
+			t.Fatalf("FindQEMU on %s with PATH QEMU: %+v, %v", runtime.GOOS, q, err)
+		}
+	}
+
 	dev := filepath.Join(t.TempDir(), "bin", qemuName)
 	writeExe(t, dev)
 	DevQEMU = dev
-	if q, err = FindQEMU(home); err != nil || q.Source != SourceDev || q.Path != dev {
-		t.Fatalf("dev fallback: %+v, %v", q, err)
+	if q, err = findQEMUForOS("darwin", home); err != nil || q.Source != SourceDev || q.Path != dev {
+		t.Fatalf("darwin dev fallback: %+v, %v", q, err)
+	}
+	if q, err = findQEMUForOS("linux", home); err != nil || q.Source != SourceDev || q.Path != dev {
+		t.Fatalf("linux dev fallback: %+v, %v", q, err)
 	}
 
 	writeExe(t, filepath.Join(home, "qemu", "11.1.3", "bin", qemuName))
@@ -223,6 +250,55 @@ func TestFindQEMUOrder(t *testing.T) {
 	t.Setenv("KIDO_QEMU", "qemu-system-aarch64")
 	if _, err = FindQEMU(home); err == nil {
 		t.Fatal("a relative KIDO_QEMU was accepted")
+	}
+}
+
+func TestFindQEMUPathSeparateImg(t *testing.T) {
+	home := t.TempDir()
+	saved := DevQEMU
+	t.Cleanup(func() { DevQEMU = saved })
+	DevQEMU = ""
+	t.Setenv("KIDO_QEMU", "")
+
+	qemuDir := t.TempDir()
+	imgDir := t.TempDir()
+	sysQEMU := filepath.Join(qemuDir, qemuName)
+	sysImg := filepath.Join(imgDir, qemuImgName)
+	writeExe(t, sysQEMU)
+	writeExe(t, sysImg)
+	t.Setenv("PATH", qemuDir+string(os.PathListSeparator)+imgDir)
+
+	if q, err := findQEMUForOS("darwin", home); err != ErrNoQEMU {
+		t.Fatalf("darwin findQEMUForOS = %+v, %v; want ErrNoQEMU", q, err)
+	}
+	q, err := findQEMUForOS("linux", home)
+	if err != nil {
+		t.Fatalf("findQEMUForOS(linux): %v", err)
+	}
+	if q.Source != SourceSystem || q.Path != sysQEMU || q.Img != sysImg {
+		t.Fatalf("got %+v, want Path=%s Img=%s Source=%s", q, sysQEMU, sysImg, SourceSystem)
+	}
+}
+
+func TestDecompressorFor(t *testing.T) {
+	cases := []struct {
+		goos    string
+		archive string
+		header  []byte
+		want    string
+	}{
+		{"darwin", "q.tar.xz", []byte{0xfd, '7', 'z', 'X', 'Z', 0x00}, darwinDecompressor},
+		{"linux", "q.archive", []byte{0xfd, '7', 'z', 'X', 'Z', 0x00}, "xz"},
+		{"linux", "q.archive", []byte{0x1f, 0x8b, 0x08}, "gzip"},
+		{"linux", "q.archive", []byte{'B', 'Z', 'h', '9'}, "bzip2"},
+		{"linux", "q.tar.xz", []byte("not magic"), "xz"},
+		{"linux", "q.tar.bz2", []byte("not magic"), "bzip2"},
+		{"linux", "q.tar.gz", []byte("not magic"), "gzip"},
+	}
+	for _, tc := range cases {
+		if got := decompressorForOS(tc.goos, tc.archive, tc.header); got != tc.want {
+			t.Errorf("decompressorForOS(%q, %q, %x) = %q, want %q", tc.goos, tc.archive, tc.header, got, tc.want)
+		}
 	}
 }
 
@@ -251,6 +327,9 @@ func TestEntitlementsMatchPackaging(t *testing.T) {
 }
 
 func TestCheckLibrariesSystemBinary(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("Mach-O library check is macOS-only")
+	}
 	libs, err := CheckLibraries("/bin/ls")
 	if err != nil {
 		t.Fatal(err)

@@ -19,6 +19,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	goruntime "runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -44,8 +45,12 @@ var errNotFound = errors.New("not found")
 
 var (
 	versionRE = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
-	tarballRE = regexp.MustCompile(`^kido-([0-9.]+)-darwin-arm64\.tar\.gz$`)
+	tarballRE = tarballPattern(goruntime.GOOS, goruntime.GOARCH)
 )
+
+func tarballPattern(goos, goarch string) *regexp.Regexp {
+	return regexp.MustCompile(`^kido-([0-9.]+)-` + regexp.QuoteMeta(goos) + `-` + regexp.QuoteMeta(goarch) + `\.tar\.gz$`)
+}
 
 // bin/kido comes last, so the helpers it starts are in place before it is.
 var payload = []struct {
@@ -59,7 +64,14 @@ var payload = []struct {
 	{"bin/kido", 0o755},
 }
 
-var required = []string{"bin/kido", "libexec/kido/kido-agent", "libexec/kido/kido-vmm"}
+var required = requiredFiles(goruntime.GOOS)
+
+func requiredFiles(goos string) []string {
+	if goos == "darwin" {
+		return []string{"bin/kido", "libexec/kido/kido-agent", "libexec/kido/kido-vmm"}
+	}
+	return []string{"bin/kido", "libexec/kido/kido-agent"}
+}
 
 var rename = os.Rename
 
@@ -228,6 +240,10 @@ func installPrefix(exe string) (string, error) {
 }
 
 func pickTarball(sums []byte) (name, version, sum string, err error) {
+	return pickTarballFor(sums, tarballRE)
+}
+
+func pickTarballFor(sums []byte, re *regexp.Regexp) (name, version, sum string, err error) {
 	sc := bufio.NewScanner(bytes.NewReader(sums))
 	for sc.Scan() {
 		f := strings.Fields(sc.Text())
@@ -235,7 +251,7 @@ func pickTarball(sums []byte) (name, version, sum string, err error) {
 			continue
 		}
 		file := strings.TrimPrefix(f[1], "*")
-		m := tarballRE.FindStringSubmatch(file)
+		m := re.FindStringSubmatch(file)
 		if m == nil {
 			continue
 		}
@@ -371,6 +387,10 @@ type staged struct {
 }
 
 func stage(tarball, prefix string) ([]staged, error) {
+	return stageFor(tarball, prefix, required)
+}
+
+func stageFor(tarball, prefix string, req []string) ([]staged, error) {
 	f, err := os.Open(tarball)
 	if err != nil {
 		return nil, err
@@ -433,7 +453,7 @@ func stage(tarball, prefix string) ([]staged, error) {
 			return files, err
 		}
 	}
-	for _, r := range required {
+	for _, r := range req {
 		if got[r].tmp == "" {
 			return files, fmt.Errorf("the release has no %s", r)
 		}

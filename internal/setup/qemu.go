@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 )
 
 // Release is a QEMU archive that kido setup can install.
@@ -37,29 +39,43 @@ const (
 
 // Where a QEMU was found.
 const (
-	SourceEnv   = "KIDO_QEMU"
-	SourceSetup = "kido setup"
-	SourceDev   = "development default"
+	SourceEnv    = "KIDO_QEMU"
+	SourceSetup  = "kido setup"
+	SourceDev    = "development default"
+	SourceSystem = "PATH"
 )
 
-// QEMU is a located qemu-system-aarch64 and the qemu-img in the same directory.
+// QEMU is a located qemu-system-aarch64 and its companion qemu-img.
 type QEMU struct {
 	Path   string
 	Img    string
 	Source string
 }
 
-// ErrNoQEMU means that neither KIDO_QEMU nor an installed QEMU exists.
-var ErrNoQEMU = errors.New("QEMU not found: run `KIDO_BACKEND=qemu kido setup` to install it, " +
-	"or set KIDO_QEMU to the absolute path of a qemu-system-aarch64 signed for Hypervisor.framework")
+// ErrNoQEMU means that no usable QEMU was found.
+var ErrNoQEMU = newErrNoQEMU()
+
+func newErrNoQEMU() error {
+	if runtime.GOOS == "darwin" {
+		return errors.New("QEMU not found: run `KIDO_BACKEND=qemu kido setup` to install it, " +
+			"or set KIDO_QEMU to the absolute path of a qemu-system-aarch64 signed for Hypervisor.framework")
+	}
+	return errors.New("QEMU not found: install qemu-system-aarch64 and qemu-img (e.g. `sudo apt install qemu-system-arm qemu-utils`), " +
+		"or set KIDO_QEMU to the absolute path of qemu-system-aarch64")
+}
 
 // QEMUDir is where kido setup installs QEMU: one directory per version and a "current" symlink.
 func QEMUDir(home string) string { return filepath.Join(home, "qemu") }
 
-// FindQEMU looks for QEMU in this order: $KIDO_QEMU, $KIDO_HOME/qemu/current (from kido setup), then
-// DevQEMU when it exists. When none exists it returns ErrNoQEMU with the path kido setup installs
-// to, so a caller that only reports the error later still holds an absolute path.
+// FindQEMU looks for QEMU in this order: $KIDO_QEMU, $KIDO_HOME/qemu/current (from kido setup),
+// DevQEMU when it exists, and on non-Darwin hosts qemu-system-aarch64 on PATH. When none exists it
+// returns ErrNoQEMU with the path kido setup installs to, so a caller that only reports the error
+// later still holds an absolute path.
 func FindQEMU(home string) (QEMU, error) {
+	return findQEMUForOS(runtime.GOOS, home)
+}
+
+func findQEMUForOS(goos, home string) (QEMU, error) {
 	if p := os.Getenv("KIDO_QEMU"); p != "" {
 		q := newQEMU(p, SourceEnv)
 		if !filepath.IsAbs(p) {
@@ -73,6 +89,23 @@ func FindQEMU(home string) (QEMU, error) {
 	}
 	if DevQEMU != "" && isRegular(DevQEMU) {
 		return newQEMU(DevQEMU, SourceDev), nil
+	}
+	if goos != "darwin" {
+		if p, err := exec.LookPath(qemuName); err == nil {
+			if abs, err := filepath.Abs(p); err == nil {
+				p = abs
+			}
+			q := newQEMU(p, SourceSystem)
+			if !isRegular(q.Img) {
+				if img, err := exec.LookPath(qemuImgName); err == nil {
+					if abs, err := filepath.Abs(img); err == nil {
+						img = abs
+					}
+					q.Img = filepath.Clean(img)
+				}
+			}
+			return q, nil
+		}
 	}
 	return installed, ErrNoQEMU
 }
