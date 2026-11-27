@@ -19,8 +19,6 @@ import (
 	"strings"
 	"syscall"
 	"time"
-
-	"golang.org/x/sys/unix"
 )
 
 // User networks (vz backend, macOS 26+). Each one is a vmnet network with its own subnet and bridge:
@@ -57,19 +55,6 @@ func (r *Runtime) networksDir() string { return filepath.Join(r.Home, "networks"
 
 // networkBase is the path prefix of a network's files: NAME.json, .vmnet, .users, .lock, .pid, .log.
 func (r *Runtime) networkBase(name string) string { return filepath.Join(r.networksDir(), name) }
-
-// vmnetSupported reports whether this macOS has vmnet networks (26 or later).
-func vmnetSupported() error {
-	v, err := unix.Sysctl("kern.osproductversion")
-	if err != nil {
-		return err
-	}
-	major, _, _ := strings.Cut(v, ".")
-	if n, err := strconv.Atoi(major); err != nil || n < 26 {
-		return fmt.Errorf("networks need macOS 26 or later (this is %s)", v)
-	}
-	return nil
-}
 
 func lastAddr(p netip.Prefix) netip.Addr {
 	return addAddr(p.Addr(), uint32(1)<<(32-p.Bits())-1)
@@ -479,20 +464,6 @@ func startHolder(ctx context.Context, p netip.Prefix, internal bool, base string
 		return fmt.Errorf("network %s: vmnet refuses the subnet: another vmnet network uses it", p)
 	}
 	return err
-}
-
-// processRunning reports whether a process named comm exists, without talking to it.
-func processRunning(comm string) bool {
-	procs, err := unix.SysctlKinfoProcSlice("kern.proc.all")
-	if err != nil {
-		return true
-	}
-	for _, kp := range procs {
-		if name, _, _ := strings.Cut(string(kp.Proc.P_comm[:]), "\x00"); name == comm {
-			return true
-		}
-	}
-	return false
 }
 
 // runHolder runs `kido-vmm hold-network` in its own session and waits until it has written the

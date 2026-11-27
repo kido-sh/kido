@@ -17,9 +17,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
-	"unsafe"
 
-	"github.com/kido-sh/kido/internal/mount"
 	"github.com/kido-sh/kido/internal/notify"
 	"github.com/kido-sh/kido/internal/proto"
 
@@ -35,9 +33,6 @@ type NotifyShare struct {
 }
 
 const (
-	atSymlinkNofollowAny = 0x0800 // AT_SYMLINK_NOFOLLOW_ANY, <sys/fcntl.h>
-	atResolveBeneath     = 0x2000 // AT_RESOLVE_BENEATH
-
 	notifyKeepalive  = 30 * time.Second
 	notifyFlushGap   = 100 * time.Millisecond
 	notifyStable     = 10 * time.Second
@@ -53,35 +48,6 @@ const (
 )
 
 var errNotifyUnsupported = errors.New("the container takes no notifications")
-
-// statBeneath reads the Mac's state of rel under the root dirfd, and its inode: never through a
-// symlink and never outside the root. Absent only when the path does not exist; any other failure is
-// unknown, which the guest always treats as a change.
-func statBeneath(dirfd int, rel string) (notify.Record, uint64) {
-	r := notify.Record{Path: rel}
-	var st unix.Stat_t
-	switch err := unix.Fstatat(dirfd, rel, &st, atSymlinkNofollowAny|atResolveBeneath); {
-	case err == nil:
-		r.State = notify.Present
-		r.Mode, r.Nlink, r.Size = uint32(st.Mode), uint32(st.Nlink), uint64(st.Size)
-		r.MtimeSec, r.MtimeNsec = st.Mtim.Sec, uint32(st.Mtim.Nsec)
-		r.CtimeSec, r.CtimeNsec = st.Ctim.Sec, uint32(st.Ctim.Nsec)
-		return r, st.Ino
-	case errors.Is(err, unix.ENOENT):
-		r.State = notify.Absent
-	}
-	return r, 0
-}
-
-// fdPath is the path of fd as F_GETPATH gives it: the case, Unicode form and /private prefix the
-// volume stores, which FSEvents paths use too.
-func fdPath(fd int) (string, error) {
-	buf := make([]byte, unix.PathMax)
-	if _, _, e := unix.Syscall(unix.SYS_FCNTL, uintptr(fd), unix.F_GETPATH, uintptr(unsafe.Pointer(&buf[0]))); e != 0 {
-		return "", e
-	}
-	return unix.ByteSliceToString(buf), nil
-}
 
 // notifySession is the relay's connection to the agent.
 type notifySession interface {
@@ -610,49 +576,6 @@ type notifyBoot struct {
 	shares []NotifyShare
 	roots  []*os.File
 	r, w   *os.File
-}
-
-// openNotify prepares notifications for the live shares. It returns nil when there are none or
-// KIDO_NO_NOTIFY is 1. A root that no longer opens without a symlink, or is no longer the directory
-// mount.Shares checked, fails the boot; any other failure only leaves notifications off.
-func openNotify(shares []mount.Share, warn io.Writer) (*notifyBoot, error) {
-	if len(shares) == 0 || os.Getenv("KIDO_NO_NOTIFY") == "1" {
-		return nil, nil
-	}
-	nb := &notifyBoot{}
-	for _, s := range shares {
-		fd, err := unix.Open(s.Source, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW_ANY|unix.O_CLOEXEC, 0)
-		if errors.Is(err, unix.ELOOP) {
-			nb.close()
-			return nil, fmt.Errorf("mount %s: the path now leads through a symbolic link; refusing to follow it", s.Source)
-		}
-		var root string
-		var st unix.Stat_t
-		if err == nil {
-			nb.roots = append(nb.roots, os.NewFile(uintptr(fd), s.Source))
-			err = unix.Fstat(fd, &st)
-		}
-		if err == nil && (uint64(st.Dev) != s.Dev || st.Ino != s.Ino) {
-			nb.close()
-			return nil, fmt.Errorf("mount %s: the path now leads to another directory; refusing to follow it", s.Source)
-		}
-		if err == nil {
-			root, err = fdPath(fd)
-		}
-		if err != nil {
-			nb.close()
-			fmt.Fprintf(warn, "kido: notifications off: %s: %v\n", s.Source, err)
-			return nil, nil
-		}
-		nb.shares = append(nb.shares, NotifyShare{Name: s.Name, Root: root})
-	}
-	var err error
-	if nb.r, nb.w, err = os.Pipe(); err != nil {
-		nb.close()
-		fmt.Fprintf(warn, "kido: notifications off: %v\n", err)
-		return nil, nil
-	}
-	return nb, nil
 }
 
 func (nb *notifyBoot) close() {

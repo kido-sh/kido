@@ -21,7 +21,6 @@ import (
 	"time"
 
 	"github.com/klauspost/compress/zstd"
-	"golang.org/x/sys/unix"
 
 	"github.com/kido-sh/kido/internal/engine"
 	"github.com/kido-sh/kido/internal/imageref"
@@ -1020,12 +1019,6 @@ func ociWriteNonZero(f *os.File, b []byte, off int64, zeros *[]ociExtent) error 
 		i = j
 	}
 	return nil
-}
-
-// ociPunchHole deallocates [off, off+n) of f, which must be block-aligned. F_PUNCHHOLE takes a
-// struct fpunchhole {u32 flags, reserved; off_t offset, length}: the leading fields of Fstore_t.
-func ociPunchHole(f *os.File, off, n int64) error {
-	return unix.FcntlFstore(f.Fd(), unix.F_PUNCHHOLE, &unix.Fstore_t{Offset: off, Length: n})
 }
 
 // ociCheckFree fails when need more bytes on f's file system would leave less than ociMinFree,

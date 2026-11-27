@@ -114,22 +114,6 @@ func (r *Runtime) WaitOwner(ctx context.Context, id string, timeout time.Duratio
 	return nil
 }
 
-func hostProcStart(pid int) int64 {
-	kp, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
-	if err != nil || int(kp.Proc.P_pid) != pid {
-		return 0
-	}
-	return kp.Proc.P_starttime.Sec*1_000_000 + int64(kp.Proc.P_starttime.Usec)
-}
-
-func hostProcAlive(pid int, start int64) bool {
-	kp, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
-	if err != nil || int(kp.Proc.P_pid) != pid || kp.Proc.P_stat == procStateZombie {
-		return false
-	}
-	return start == 0 || kp.Proc.P_starttime.Sec*1_000_000+int64(kp.Proc.P_starttime.Usec) == start
-}
-
 // Signal sends sig to the main process of a running container, inside the guest.
 func (r *Runtime) Signal(ctx context.Context, ref string, sig syscall.Signal) error {
 	info, err := r.Resolve(ref)

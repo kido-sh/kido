@@ -1,3 +1,5 @@
+//go:build darwin
+
 // Command kido-agent is the guest daemon of kido: it runs commands in the VM on behalf of the CLI.
 package main
 

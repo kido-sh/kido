@@ -17,8 +17,6 @@ import (
 	"syscall"
 	"time"
 
-	"golang.org/x/sys/unix"
-
 	"github.com/kido-sh/kido/internal/engine"
 	"github.com/kido-sh/kido/internal/imageref"
 	"github.com/kido-sh/kido/internal/mount"
@@ -26,11 +24,10 @@ import (
 )
 
 const (
-	readyTimeout    = 30 * time.Second
-	defaultStop     = 10 * time.Second
-	defaultCPUs     = 2
-	defaultMemory   = 1024
-	procStateZombie = 5
+	readyTimeout  = 30 * time.Second
+	defaultStop   = 10 * time.Second
+	defaultCPUs   = 2
+	defaultMemory = 1024
 )
 
 func (r *Runtime) Create(ctx context.Context, opts engine.CreateOptions) (*engine.Container, error) {
@@ -550,42 +547,6 @@ func killQEMU(info *Info) error {
 		time.Sleep(50 * time.Millisecond)
 	}
 	return fmt.Errorf("qemu %d did not exit after SIGKILL", info.PID)
-}
-
-func kinfo(pid int) (*unix.KinfoProc, bool) {
-	if pid <= 0 {
-		return nil, false
-	}
-	kp, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
-	if err != nil || int(kp.Proc.P_pid) != pid {
-		return nil, false
-	}
-	return kp, true
-}
-
-func procStart(pid int) int64 {
-	kp, ok := kinfo(pid)
-	if !ok {
-		return 0
-	}
-	return kp.Proc.P_starttime.Sec*1_000_000 + int64(kp.Proc.P_starttime.Usec)
-}
-
-// processAlive is true when pid is a live QEMU started at start (microseconds; 0 skips the check),
-// so a recycled pid is not mistaken for the VM.
-func processAlive(pid int, start int64) bool {
-	kp, ok := kinfo(pid)
-	if !ok || kp.Proc.P_stat == procStateZombie {
-		return false
-	}
-	comm, _, _ := strings.Cut(string(kp.Proc.P_comm[:]), "\x00")
-	if comm == "" || !strings.HasPrefix("qemu-system-aarch64", comm) && comm != vmmComm {
-		return false
-	}
-	if start != 0 && kp.Proc.P_starttime.Sec*1_000_000+int64(kp.Proc.P_starttime.Usec) != start {
-		return false
-	}
-	return true
 }
 
 // monitor runs HMP commands on the VM's monitor socket.

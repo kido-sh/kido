@@ -9,9 +9,7 @@ import (
 	"io/fs"
 	"net"
 	"os"
-	"os/exec"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/kido-sh/kido/internal/proto"
@@ -114,9 +112,8 @@ func (r *Runtime) waitAgent(ctx context.Context, id string, port int, exited <-c
 func waitListener(ctx context.Context, pid, port int, exited <-chan struct{}) error {
 	deadline := time.Now().Add(readyTimeout)
 	for {
-		out, err := exec.CommandContext(ctx, "/usr/sbin/lsof", "-nP", "-a", "-p", strconv.Itoa(pid),
-			"-iTCP@127.0.0.1:"+strconv.Itoa(port), "-sTCP:LISTEN", "-t").Output()
-		if err == nil && strings.TrimSpace(string(out)) == strconv.Itoa(pid) {
+		ok, err := processListensLoopback(ctx, pid, port)
+		if err == nil && ok {
 			return nil
 		}
 		select {
@@ -127,7 +124,10 @@ func waitListener(ctx context.Context, pid, port int, exited <-chan struct{}) er
 		case <-time.After(10 * time.Millisecond):
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("the VM process does not listen on the agent port 127.0.0.1:%d (lsof: %v)", port, err)
+			if err != nil {
+				return fmt.Errorf("the VM process does not listen on the agent port 127.0.0.1:%d (%v)", port, err)
+			}
+			return fmt.Errorf("the VM process does not listen on the agent port 127.0.0.1:%d", port)
 		}
 	}
 }

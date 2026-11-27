@@ -1,3 +1,5 @@
+//go:build darwin
+
 // Command kqprobe is a guest side of test/e2e.sh: it waits for a kqueue vnode event on a file.
 //
 //	kqprobe PATH SECONDS

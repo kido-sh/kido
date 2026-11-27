@@ -5,9 +5,40 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestBackendFromEnv(t *testing.T) {
+	cases := []struct {
+		goos    string
+		env     string
+		want    string
+		wantErr string
+	}{
+		{"darwin", "", backendVZ, ""},
+		{"darwin", "vz", backendVZ, ""},
+		{"darwin", "qemu", backendQEMU, ""},
+		{"darwin", "invalid", "", "must be vz or qemu"},
+		{"linux", "", backendQEMU, ""},
+		{"linux", "qemu", backendQEMU, ""},
+		{"linux", "vz", "", "requires macOS"},
+		{"linux", "invalid", "", "must be qemu on linux"},
+	}
+	for _, tc := range cases {
+		got, err := backendFromEnv(tc.goos, tc.env)
+		if tc.wantErr != "" {
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("backendFromEnv(%q, %q) = %q, %v; want error containing %q", tc.goos, tc.env, got, err, tc.wantErr)
+			}
+			continue
+		}
+		if err != nil || got != tc.want {
+			t.Errorf("backendFromEnv(%q, %q) = %q, %v; want %q, nil", tc.goos, tc.env, got, err, tc.want)
+		}
+	}
+}
 
 func TestVMMCandidatesFollowSymlinks(t *testing.T) {
 	dir := t.TempDir()

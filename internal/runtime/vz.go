@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -39,12 +40,27 @@ const (
 )
 
 func BackendFromEnv() (string, error) {
-	switch b := os.Getenv("KIDO_BACKEND"); b {
-	case "", backendVZ:
+	return backendFromEnv(goruntime.GOOS, os.Getenv("KIDO_BACKEND"))
+}
+
+func backendFromEnv(goos, b string) (string, error) {
+	switch b {
+	case "":
+		if goos == "darwin" {
+			return backendVZ, nil
+		}
+		return backendQEMU, nil
+	case backendVZ:
+		if goos != "darwin" {
+			return "", fmt.Errorf("KIDO_BACKEND=%s requires macOS (Virtualization.framework is not available on %s); use %s", backendVZ, goos, backendQEMU)
+		}
 		return backendVZ, nil
 	case backendQEMU:
 		return backendQEMU, nil
 	default:
+		if goos != "darwin" {
+			return "", fmt.Errorf("KIDO_BACKEND=%q: must be %s on %s", b, backendQEMU, goos)
+		}
 		return "", fmt.Errorf("KIDO_BACKEND=%q: must be %s or %s", b, backendVZ, backendQEMU)
 	}
 }
