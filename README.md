@@ -1,8 +1,8 @@
 # kido
 
-kido runs macOS command-line tools in small Darwin VMs on Apple Silicon Macs. `kido run` starts a
-container, `kido build` makes an image and `kido push` shares it. Each container boots a real Darwin
-kernel (XNU) in under a second.
+kido runs macOS command-line tools in small Darwin VMs on Apple Silicon Macs and ARM64 Linux hosts.
+`kido run` starts a container, `kido build` makes an image and `kido push` shares it. Each container
+boots a real Darwin kernel (XNU) in around a second.
 
 ```console
 $ kido run --rm darwin sw_vers
@@ -15,7 +15,8 @@ Darwin kido 25.5.0 Darwin Kernel Version 25.5.0: Mon Nov 23 13:26:52 UTC 2026; n
 
 ## Quick start
 
-You need an Apple Silicon Mac with macOS 15 or later. kido never needs root.
+You need an Apple Silicon Mac with macOS 15 or later, or an ARM64 Linux host with `/dev/kvm` access.
+kido never needs root.
 
 ```sh
 curl -fsSL https://kido.sh/install.sh | sh
@@ -24,7 +25,7 @@ kido run --rm darwin sw_vers
 ```
 
 The script installs kido into `~/.local` and checks the release's signature. Then it runs
-`kido setup`, which pulls the Darwin image, a download of about 40 MB.
+`kido setup`, which pulls the Darwin image, a download of about 30 MB.
 
 With Homebrew, run `brew install kido-sh/tap/kido` and then `kido setup`.
 
@@ -81,8 +82,9 @@ $ kido pull ghcr.io/YOUR-NAME/yq
 
 ## How it works
 
-Each container is its own small VM, with its own kernel, memory and disk. kido starts it with
-Apple's Virtualization.framework. Set `KIDO_BACKEND=qemu` to use QEMU instead. The system inside is
+Each container is its own small VM, with its own kernel, memory and disk. On macOS, kido starts it
+with Apple's Virtualization.framework. On ARM64 Linux, kido uses its built-in KVM VMM with no QEMU
+required. Set `KIDO_BACKEND=qemu` to use QEMU instead. The system inside is
 [KidoDarwin](https://github.com/kido-sh/darwin). It has Apple's open-source XNU kernel, launchd and
 a small set of Unix tools. A small agent in the VM runs your commands. kido talks to it over an
 encrypted and authenticated channel. [docs/security.md](docs/security.md) explains how.
@@ -96,8 +98,8 @@ encrypted and authenticated channel. [docs/security.md](docs/security.md) explai
 - Apple's own binaries do not run, because they are built for arm64e.
 - Tools built only for x86_64 do not run, because there is no Rosetta. GUI apps do not run either.
 - `-v` mounts a directory live, in beta, only on the Virtualization.framework backend, with an image that
-  supports it. Files, every mount on QEMU or of an image without support, and the mounts of a container
-  created with `--copy-mounts` are copied in and out.
+  supports it. Files, mounts on Linux KVM or QEMU or of an image without support, and the mounts of a
+  container created with `--copy-mounts` are copied in and out.
 - There is no USB passthrough and no GPU.
 
 kido is experimental. Commands and the image format may still change.
