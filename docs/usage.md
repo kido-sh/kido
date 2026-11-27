@@ -148,9 +148,11 @@ credentials in `~/.docker/config.json`.
 `-v HOST:CONTAINER[:ro]` and `--mount type=bind,source=HOST,target=CONTAINER[,readonly]` put a host
 directory or file into the container. On the Virtualization.framework backend, a directory is
 mounted live when the image's guest supports it: the image carries the label
-`sh.kido.virtiofs=1`, as kido's darwin images do. Every other mount is a copy.
+`sh.kido.virtiofs=1`, as kido's darwin images do. Every other mount is a copy. Live mounts are in
+beta: `--copy-mounts` on `kido run` or `kido create` copies the container's directories instead,
+and `kido inspect` lists each mount of a container with its mode, `live` or `copy`.
 
-Live mounts:
+Live mounts (beta):
 
 - Writes in the container reach the Mac as they are made, and changes on the Mac show up in the
   container within about a second. Deletions and renames pass through both ways. Stores through a
@@ -175,7 +177,8 @@ Live mounts:
   is a target, live or copied, that leads into another mount in the container. Targets are compared
   through `/etc`, `/tmp` and `/var`, which lead to `/private` in the container.
 
-Copy mounts (files, and directories on QEMU or with an image without the label):
+Copy mounts (files, and directories on QEMU, with an image without the label or with
+`--copy-mounts`):
 
 - The host directory or file is copied in as a snapshot at every boot (create, start).
 - Read-write mounts copy new and changed files back at `kido stop`, at the end of `kido run` (also
@@ -192,7 +195,7 @@ Copy mounts (files, and directories on QEMU or with an image without the label):
 
 | Command | What it does |
 |---|---|
-| `run` | Create a container from an image and run a command in it (`-it --rm -d --name -e --env-file -w -u -p -v --mount --network --cpus -m --entrypoint --pull --restart`) |
+| `run` | Create a container from an image and run a command in it (`-it --rm -d --name -e --env-file -w -u -p -v --mount --copy-mounts --network --cpus -m --entrypoint --pull --restart`) |
 | `create`, `start`, `stop`, `restart`, `kill`, `wait` | Container lifecycle (`start -a -i`, `kill -s`). `stop` and `restart` send SIGTERM to the main process, wait `-t` seconds (default 10), then send SIGKILL. Only then do they sync live `-v` mounts, copy copied ones back and power off. With `-t 0` they kill the VM at once, like `kill`, and do none of that |
 | `exec` | Run a command in a running container (`-it -d -e --env-file -w -u`) |
 | `top` | Run `ps` in the container's VM (`ps -ef` by default, or the `ps` options given after the container) |

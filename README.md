@@ -95,8 +95,9 @@ encrypted and authenticated channel. [docs/security.md](docs/security.md) explai
   [open an issue](https://github.com/kido-sh/darwin/issues) with the tool's name.
 - Apple's own binaries do not run, because they are built for arm64e.
 - Tools built only for x86_64 do not run, because there is no Rosetta. GUI apps do not run either.
-- `-v` mounts a directory live only on the Virtualization.framework backend, with an image that supports it.
-  Files, every mount on QEMU and mounts of images without support are copied in and out.
+- `-v` mounts a directory live, in beta, only on the Virtualization.framework backend, with an image that
+  supports it. Files, every mount on QEMU or of an image without support, and the mounts of a container
+  created with `--copy-mounts` are copied in and out.
 - There is no USB passthrough and no GPU.
 
 kido is experimental. Commands and the image format may still change.
