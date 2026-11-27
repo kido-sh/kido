@@ -52,7 +52,7 @@ const (
 	ociMaxManifest     = 4 << 20
 	ociMaxConfig       = 1 << 20
 	ociMaxUncompressed = 2 << 40
-	// ociMaxWindow bounds decoder memory; kido's own encoder uses a 4 MiB window.
+	// ociMaxWindow bounds decoder memory; kido's own encoder uses an 8 MiB window.
 	ociMaxWindow = 128 << 20
 
 	ociSparseBlock  = 4096
@@ -871,9 +871,9 @@ func ociSpool(ctx context.Context, src io.Reader, dir string, compress bool, nee
 	if compress {
 		var enc *zstd.Encoder
 		enc, err = zstd.NewWriter(cw,
-			zstd.WithEncoderLevel(zstd.SpeedDefault),
-			zstd.WithWindowSize(4<<20),
-			zstd.WithEncoderConcurrency(min(goruntime.GOMAXPROCS(0), 4)),
+			zstd.WithEncoderLevel(zstd.SpeedBestCompression),
+			zstd.WithWindowSize(8<<20),
+			zstd.WithEncoderConcurrency(min(goruntime.GOMAXPROCS(0), 2)),
 			zstd.WithConcurrentBlocks(true))
 		if err != nil {
 			return b, 0, err

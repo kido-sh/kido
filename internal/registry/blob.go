@@ -25,7 +25,7 @@ const (
 	freeCheckGap = 256 << 20
 )
 
-// maxDecoderWindow bounds decoder memory; kido's own encoder uses a 4 MiB window.
+// maxDecoderWindow bounds decoder memory; kido's own encoder uses an 8 MiB window.
 const maxDecoderWindow = 128 << 20
 
 type ctxReader struct {
@@ -67,12 +67,10 @@ func compressFile(ctx context.Context, in io.Reader, dir string, p *progress) (p
 	}()
 	h := sha256.New()
 	cw := &countingWriter{w: io.MultiWriter(out, h)}
-	// Four 16 MiB jobs at a time: on the 1.1 GB base disk 0.3 s and 265 MiB RSS, against 0.9 s
-	// and 25 MiB single-threaded and 0.4 s and 676 MiB with eight jobs of 32 MiB.
 	enc, err := zstd.NewWriter(cw,
-		zstd.WithEncoderLevel(zstd.SpeedDefault),
-		zstd.WithWindowSize(4<<20),
-		zstd.WithEncoderConcurrency(min(runtime.GOMAXPROCS(0), 4)),
+		zstd.WithEncoderLevel(zstd.SpeedBestCompression),
+		zstd.WithWindowSize(8<<20),
+		zstd.WithEncoderConcurrency(min(runtime.GOMAXPROCS(0), 2)),
 		zstd.WithConcurrentBlocks(true))
 	if err != nil {
 		return "", d, 0, err
