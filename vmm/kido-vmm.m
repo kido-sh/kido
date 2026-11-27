@@ -602,6 +602,7 @@ static void usage(void) {
                   "               [--mac MAC] [--console FILE [--console-max BYTES]] [--state-file FILE] [--disk-sync full|fsync|none]\n"
                   "               [--network FILE] [--forward tcp|udp:HOSTIP:HOSTPORT:GUESTIP:GUESTPORT ...]\n"
                   "               [--extra-disk RAW ...] [--extra-disk-ro RAW ...]\n"
+                  "               [--share NAME=DIR ...] [--share-ro NAME=DIR ...]\n"
                   "       kido-vmm hold-network --subnet A.B.C.D/N [--host-only] --network FILE --users FILE\n");
   exit(2);
 }
@@ -635,6 +636,7 @@ int main(int argc, const char **argv) {
     NSMutableArray<NSValue *> *forwards = [NSMutableArray array];
     NSMutableArray<NSString *> *extraDisks = [NSMutableArray array];
     NSMutableArray<NSNumber *> *extraReadOnly = [NSMutableArray array];
+    NSMutableDictionary<NSString *, VZSharedDirectory *> *shares = [NSMutableDictionary dictionary];
     for (int i = 1; i < argc; i++) {
       const char *a = argv[i];
       if (i + 1 >= argc) usage();
@@ -654,6 +656,24 @@ int main(int argc, const char **argv) {
       else if (!strcmp(a, "--extra-disk") || !strcmp(a, "--extra-disk-ro")) {
         [extraDisks addObject:v];
         [extraReadOnly addObject:@(strcmp(a, "--extra-disk-ro") == 0)];
+      } else if (!strcmp(a, "--share") || !strcmp(a, "--share-ro")) {
+        NSRange eq = [v rangeOfString:@"="];
+        NSString *name = eq.location == NSNotFound ? @"" : [v substringToIndex:eq.location];
+        NSString *dir = eq.location == NSNotFound ? @"" : [v substringFromIndex:eq.location + 1];
+        NSError *bad = nil;
+        BOOL isDir = NO;
+        NSString *why = nil;
+        if (![VZMultipleDirectoryShare validateName:name error:&bad]) why = bad.localizedDescription ?: @"invalid name";
+        else if (shares[name]) why = @"the name is given twice";
+        else if (![dir hasPrefix:@"/"]) why = @"DIR is not an absolute path";
+        else if (![NSFileManager.defaultManager fileExistsAtPath:dir isDirectory:&isDir] || !isDir)
+          why = @"DIR is not a directory";
+        if (why) {
+          fprintf(stderr, "kido-vmm: bad %s %s: %s\n", a, v.UTF8String, why.UTF8String);
+          return 2;
+        }
+        shares[name] = [[VZSharedDirectory alloc] initWithURL:[NSURL fileURLWithPath:dir]
+                                                     readOnly:strcmp(a, "--share-ro") == 0];
       } else if (!strcmp(a, "--forward")) {
         forward_t *f = parseForward(v.UTF8String);
         if (!f) {
@@ -756,6 +776,12 @@ int main(int argc, const char **argv) {
     }
     config.networkDevices = @[ net ];
 
+    if (shares.count) {
+      VZVirtioFileSystemDeviceConfiguration *fs = [[VZVirtioFileSystemDeviceConfiguration alloc] initWithTag:@"kido"];
+      fs.share = [[VZMultipleDirectoryShare alloc] initWithDirectories:shares];
+      config.directorySharingDevices = @[ fs ];
+    }
+
     if (![config validateWithError:&error]) {
       fprintf(stderr, "kido-vmm: invalid configuration: %s\n", error.localizedDescription.UTF8String);
       return 1;
@@ -791,8 +817,9 @@ int main(int argc, const char **argv) {
     });
     (void)term, (void)intr, (void)usr1, (void)usr2;
 
-    logf_("cpus %ld, memory %ld MB, MAC %s, %s, %lu forwards", (long)cpus, (long)memoryMB, net.MACAddress.string.UTF8String,
-          network ? "vmnet network" : "NAT", (unsigned long)forwards.count);
+    logf_("cpus %ld, memory %ld MB, MAC %s, %s, %lu forwards, %lu shares", (long)cpus, (long)memoryMB,
+          net.MACAddress.string.UTF8String, network ? "vmnet network" : "NAT", (unsigned long)forwards.count,
+          (unsigned long)shares.count);
     [vm startWithCompletionHandler:^(NSError *err) {
       if (err) {
         logf_("start failed: %s", err.localizedDescription.UTF8String);
