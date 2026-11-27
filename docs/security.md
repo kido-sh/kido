@@ -25,6 +25,13 @@
   A container's console log is capped in size.
 - **Files in and out.** `kido cp`, build contexts and copy mounts refuse paths that escape their
   directory (`..`, absolute paths, symlinks that point out).
+- **Live mounts.** A live `-v` mount gives the container the directory as you could use it: it can
+  read, change and delete everything in it, and only `:ro` stops writes, enforced by the Mac.
+  Mounting your home directory also gives it `~/.kido`, with the keys that reach your other
+  containers, and files such as your shell profile, so it amounts to giving the container your
+  account. kido refuses nothing here: what to share is your choice. At every boot it checks that
+  each mount's path still leads where it did, so a symbolic link placed through a live mount cannot
+  send another mount elsewhere; a change made between that check and the boot is not caught.
 - **Downloads.** `kido setup` fetches QEMU over HTTPS only and checks a SHA-256 pinned in the
   binary. It unpacks with size limits and does not follow links out of its directory.
 - **Releases.** Every release has a `SHA256SUMS` file, signed with the kido release key by

@@ -143,10 +143,39 @@ credentials in `~/.docker/config.json`.
   listen on the Mac's LAN addresses. For UDP on the Virtualization.framework backend, each client
   keeps its own relay until neither side has sent anything for 90 seconds.
 
-## Copy mounts: `-v` and `--mount type=bind`
+## Mounts: `-v` and `--mount type=bind`
 
-`-v HOST:CONTAINER[:ro]` and `--mount type=bind,source=HOST,target=CONTAINER[,readonly]` copy
-files. They are not live bind mounts.
+`-v HOST:CONTAINER[:ro]` and `--mount type=bind,source=HOST,target=CONTAINER[,readonly]` put a host
+directory or file into the container. On the Virtualization.framework backend, a directory is
+mounted live when the image's guest supports it: the image carries the label
+`sh.kido.virtiofs=1`, as kido's darwin images do. Every other mount is a copy.
+
+Live mounts:
+
+- Writes in the container reach the Mac as they are made, and changes on the Mac show up in the
+  container within about a second. Deletions and renames pass through both ways. Stores through a
+  mapped file reach the Mac when it is synced. Nothing is copied at start or stop, and
+  `kido commit` does not include the mounted files.
+- `:ro` (`readonly`) is enforced by the Mac: the container cannot change the directory.
+- In the container, files appear to belong to whichever user looks at them, and changing their
+  owner has no effect. On the Mac, what the container creates belongs to you.
+- `kido stop`, `restart`, `run` (also with `--rm`) and `rm -f` have the container sync its writes
+  first. `kill`, `stop -t 0`, `restart -t 0` and a VM that dies do not: what the container wrote
+  with write(2) is already on the Mac, but stores to a mapped file that were not synced are lost.
+- A mount hands the container everything in the directory. Mounting your home directory also hands
+  it `~/.kido`, where kido keeps the keys that reach your other containers, and files such as your
+  shell profile: treat it as giving the container your account. `kido cp` into a mounted directory
+  writes to the Mac.
+- At every boot kido checks that each mount's path still leads where it did when the container was
+  created, and refuses to start otherwise, so a symbolic link placed through one mount cannot send
+  another one elsewhere. A container keeps the kind of mounts it was created with: one created by
+  an older kido keeps its copies.
+- The target must be absolute, and missing or a directory in the image, not a file or a symbolic
+  link. While the mount is up it hides what that directory holds. System paths are refused, and so
+  is a target, live or copied, that leads into another mount in the container. Targets are compared
+  through `/etc`, `/tmp` and `/var`, which lead to `/private` in the container.
+
+Copy mounts (files, and directories on QEMU or with an image without the label):
 
 - The host directory or file is copied in as a snapshot at every boot (create, start).
 - Read-write mounts copy new and changed files back at `kido stop`, at the end of `kido run` (also
@@ -164,7 +193,7 @@ files. They are not live bind mounts.
 | Command | What it does |
 |---|---|
 | `run` | Create a container from an image and run a command in it (`-it --rm -d --name -e --env-file -w -u -p -v --mount --network --cpus -m --entrypoint --pull --restart`) |
-| `create`, `start`, `stop`, `restart`, `kill`, `wait` | Container lifecycle (`start -a -i`, `kill -s`). `stop` and `restart` send SIGTERM to the main process, wait `-t` seconds (default 10), then send SIGKILL. Only then do they copy `-v` mounts back and power off |
+| `create`, `start`, `stop`, `restart`, `kill`, `wait` | Container lifecycle (`start -a -i`, `kill -s`). `stop` and `restart` send SIGTERM to the main process, wait `-t` seconds (default 10), then send SIGKILL. Only then do they sync live `-v` mounts, copy copied ones back and power off. With `-t 0` they kill the VM at once, like `kill`, and do none of that |
 | `exec` | Run a command in a running container (`-it -d -e --env-file -w -u`) |
 | `top` | Run `ps` in the container's VM (`ps -ef` by default, or the `ps` options given after the container) |
 | `export` | Write a container's file system as a tar archive (`-o FILE`, or stdout). A stopped container boots without its command for this. Sockets and device nodes are skipped with a warning |
@@ -207,6 +236,7 @@ its RUN step.
 | `KIDO_QEMU` | Absolute path of `qemu-system-aarch64`; overrides what `kido setup` installed |
 | `KIDO_BACKEND` | `vz` (default) or `qemu` |
 | `KIDO_VMM` | Path of the `kido-vmm` helper for the vz backend |
+| `KIDO_DEV_VIRTIOFS` | Development only: comma-separated `NAME=DIR`, `NAME=DIR:ro` or `NAME=DIR:rw` entries that every vz boot from that environment, builds excepted, attaches to the `kido` virtio-fs device. kido neither mounts nor syncs them, any root process in the container can mount them, and the names `m0`, `m1`, ... are kido's own |
 | `KIDO_VZ_SUBNET` | vmnet's NAT network for the vz backend when it is not `192.168.64.0/24` (IPv4, /16 to /29) |
 | `DOCKER_CONFIG` | Where registry credentials are read and stored (default `~/.docker`) |
 
@@ -218,7 +248,7 @@ its RUN step.
      |           -drive disk.qcow2 (overlay on the image's disk.img)  -netdev user (NAT, hostfwd)
      |     VZ:   kido-vmm (Virtualization.framework, APFS clone of disk.img, vmnet)
      |-- internal/build: Dockerfile subset on top of the engine (RUN in a build VM)
-     |-- internal/mount: copy mounts (-v) through tar disks
+     |-- internal/mount: -v mounts, live over virtio-fs on VZ or copied through tar disks
      |-- internal/registry: OCI push/pull (zstd disk layer, image config, registry credentials)
      '-- internal/setup: QEMU download, verify, unpack, sign; kido doctor
             |
