@@ -28,14 +28,22 @@
 
 static NSDate *gStarted;
 static NSString *gStateFile;
+static atomic_long gLogLeft = 8 << 20;
+static atomic_bool gLogFull;
 
 static void logf_(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 static void logf_(const char *fmt, ...) {
+  if (atomic_load(&gLogFull)) return;
   char buf[1024];
   va_list ap;
   va_start(ap, fmt);
-  vsnprintf(buf, sizeof(buf), fmt, ap);
+  int n = vsnprintf(buf, sizeof(buf), fmt, ap);
   va_end(ap);
+  long cost = (n < 0 ? 0 : MIN(n, (int)sizeof(buf))) + 24;
+  if (atomic_fetch_sub(&gLogLeft, cost) < cost) {
+    if (!atomic_exchange(&gLogFull, true)) fprintf(stderr, "kido-vmm: log limit reached\n");
+    return;
+  }
   fprintf(stderr, "kido-vmm %7.3f: %s\n", -gStarted.timeIntervalSinceNow, buf);
 }
 
@@ -115,6 +123,7 @@ static int dialGuest(const struct sockaddr_in *sa, int timeoutMS) {
   }
   int s = socket(AF_INET, SOCK_STREAM, 0);
   if (s < 0) return -1;
+  fcntl(s, F_SETFD, FD_CLOEXEC);
   if (setsockopt(s, IPPROTO_IP, IP_BOUND_IF, &idx, sizeof(idx)) != 0) goto fail;
   int fl = fcntl(s, F_GETFL);
   fcntl(s, F_SETFL, fl | O_NONBLOCK);
@@ -348,6 +357,7 @@ static void *acceptLoop(void *arg) {
       if (errno != EINTR && errno != ECONNABORTED) usleep(10000);
       continue;
     }
+    fcntl(fd, F_SETFD, FD_CLOEXEC);
     if (atomic_fetch_add(&f->conns, 1) >= maxConns) {
       atomic_fetch_sub(&f->conns, 1);
       static atomic_int refused;
