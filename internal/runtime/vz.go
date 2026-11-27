@@ -260,6 +260,12 @@ func (r *Runtime) vzBoot(ctx context.Context, info *Info) error {
 	if err != nil {
 		return err
 	}
+	var dev []string
+	if info.Labels[BuildLabel] == "" {
+		if dev, err = devShares(os.Getenv("KIDO_DEV_VIRTIOFS")); err != nil {
+			return err
+		}
+	}
 	if !uuidRE.MatchString(info.RootUUID) {
 		return fmt.Errorf("image %s: invalid root UUID %q", info.Image, info.RootUUID)
 	}
@@ -298,6 +304,7 @@ func (r *Runtime) vzBoot(ctx context.Context, info *Info) error {
 	if err != nil {
 		return err
 	}
+	margs = append(margs, dev...)
 	for _, f := range []string{"console.log", "vmm.log"} {
 		if err := os.WriteFile(filepath.Join(dir, f), nil, 0o600); err != nil {
 			return err
@@ -480,4 +487,37 @@ func (r *Runtime) vzCommit(ctx context.Context, info *Info, target, parent image
 		}
 		return nil
 	})
+}
+
+// devShares turns KIDO_DEV_VIRTIOFS, comma-separated NAME=DIR, NAME=DIR:ro or NAME=DIR:rw entries
+// for developing the guest's virtio-fs client, into kido-vmm arguments; the guest mounts them itself.
+func devShares(spec string) ([]string, error) {
+	var args []string
+	seen := map[string]bool{}
+	for _, raw := range strings.Split(spec, ",") {
+		e := strings.TrimSpace(raw)
+		if e == "" {
+			continue
+		}
+		flag := "--share"
+		if v, ok := strings.CutSuffix(e, ":ro"); ok {
+			flag, e = "--share-ro", v
+		} else {
+			e = strings.TrimSuffix(e, ":rw")
+		}
+		name, dir, _ := strings.Cut(e, "=")
+		badName := name == "" || name == "." || name == ".." || len(name) > 255 || strings.ContainsAny(name, "/\x00") ||
+			seen[name] || len(name) > 1 && name[0] == 'm' && strings.Trim(name[1:], "0123456789") == ""
+		if badName || !filepath.IsAbs(dir) || !isDir(dir) {
+			return nil, fmt.Errorf("KIDO_DEV_VIRTIOFS: bad entry %q: want NAME=DIR[:ro|:rw] with a unique NAME other than m0, m1, ... and DIR an existing directory", strings.TrimSpace(raw))
+		}
+		seen[name] = true
+		args = append(args, flag, e)
+	}
+	return args, nil
+}
+
+func isDir(path string) bool {
+	fi, err := os.Stat(path)
+	return err == nil && fi.IsDir()
 }

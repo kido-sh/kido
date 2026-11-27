@@ -45,6 +45,9 @@ type Runtime struct {
 
 var _ engine.Engine = (*Runtime)(nil)
 
+// BuildLabel marks a build container; its value is the image being built.
+const BuildLabel = "kido.build"
+
 // DefaultHome is $KIDO_HOME, or ~/.kido.
 func DefaultHome() string {
 	if h := os.Getenv("KIDO_HOME"); h != "" {

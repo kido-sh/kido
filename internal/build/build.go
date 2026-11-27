@@ -57,7 +57,7 @@ func (e *StepError) Error() string {
 const ExposeLabel = "kido.expose"
 
 // BuildLabel marks a build container; its value is the image being built.
-const BuildLabel = "kido.build"
+const BuildLabel = runtime.BuildLabel
 
 // defaultPath is the guest agent's default PATH. Like BuildKit, a build gives the image this PATH
 // when its base sets none, so that ENV PATH=/x:$PATH keeps the system directories.
