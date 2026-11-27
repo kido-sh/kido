@@ -1,9 +1,12 @@
 # Build, sign, package and install kido. `make help` lists the targets.
 # Written for the GNU Make 3.81 that ships with macOS.
 
-GO      ?= go
-PREFIX  ?= /usr/local
-DESTDIR ?=
+GO          ?= go
+HOST_OS     := $(shell $(GO) env GOHOSTOS)
+TARGET_OS   ?= $(if $(GOOS),$(GOOS),$(HOST_OS))
+TARGET_ARCH ?= $(if $(GOARCH),$(GOARCH),arm64)
+PREFIX      ?= /usr/local
+DESTDIR     ?=
 # Where builds and release archives go.
 OUT     ?= bin
 DISTDIR ?= dist
@@ -25,7 +28,25 @@ DEVELOPER_ID   ?=
 SIGN_ID_PREFIX ?= sh.kido.
 export DEVELOPER_ID
 
-BINARIES     := kido kido-agent kido-vmm
+ifeq ($(TARGET_OS),darwin)
+BINARIES      := kido kido-agent kido-vmm
+BUILD_TARGETS := $(OUT)/kido $(OUT)/kido-agent $(OUT)/kido-vmm
+SIGN_DEP      := sign
+KIDO_ENV      := GOOS=$(TARGET_OS) GOARCH=$(TARGET_ARCH)
+else
+BINARIES      := kido kido-agent
+BUILD_TARGETS := $(OUT)/kido $(OUT)/kido-agent
+SIGN_DEP      := build
+KIDO_ENV      := CGO_ENABLED=0 GOOS=$(TARGET_OS) GOARCH=$(TARGET_ARCH)
+endif
+
+ifeq ($(HOST_OS),darwin)
+TAR_FLAGS := --no-mac-metadata --no-xattrs --no-acls --uid 0 --gid 0 --uname root --gname wheel
+else
+TAR_FLAGS := --no-xattrs --no-acls --numeric-owner --owner=0 --group=0
+endif
+
+SHA256       := $(shell if command -v shasum >/dev/null 2>&1; then echo "shasum -a 256"; else echo "sha256sum"; fi)
 ENTITLEMENTS := packaging/entitlements
 LDFLAGS      := -s -w -X main.version=$(VERSION) -X github.com/kido-sh/kido/internal/setup.DevQEMU=$(DEV_QEMU) -X github.com/kido-sh/kido/internal/runtime.DevVMM=$(DEV_VMM)
 GOBUILD       = $(GO) build -trimpath -ldflags '$(LDFLAGS)'
@@ -39,7 +60,7 @@ DOCDIR     = $(DESTDIR)$(PREFIX)/share/doc/kido
 RELEASE_PUB       := internal/upgrade/release.pub
 RELEASE_NAMESPACE := release@kido.sh
 
-DIST_NAME    := kido-$(VERSION)-darwin-arm64
+DIST_NAME    := kido-$(VERSION)-$(TARGET_OS)-$(TARGET_ARCH)
 DIST_ROOT    := $(DISTDIR)/$(DIST_NAME)
 DIST_TAR     := $(DISTDIR)/$(DIST_NAME).tar.gz
 
@@ -47,7 +68,7 @@ DIST_TAR     := $(DISTDIR)/$(DIST_NAME).tar.gz
 
 all: build
 
-build: $(OUT)/kido $(OUT)/kido-agent $(OUT)/kido-vmm
+build: $(BUILD_TARGETS)
 
 # Rewritten only when the version changes, so the binaries relink exactly then.
 $(OUT)/.version: FORCE
@@ -55,7 +76,7 @@ $(OUT)/.version: FORCE
 	@echo '$(VERSION)' | cmp -s - $@ || echo '$(VERSION)' > $@
 
 $(OUT)/kido: $(GO_SOURCES) $(OUT)/.version
-	GOOS=darwin GOARCH=arm64 $(GOBUILD) -o $@ ./cmd/kido
+	$(KIDO_ENV) $(GOBUILD) -o $@ ./cmd/kido
 
 ifeq ($(HAVE_AGENT),)
 $(OUT)/kido-agent:
@@ -71,6 +92,7 @@ $(OUT)/kido-vmm: vmm/kido-vmm.m vmm/notify.c vmm/notify.h
 	xcrun clang -fobjc-arc -O2 -Wall -Wextra -Wno-unused-parameter -mmacosx-version-min=13.0 \
 	  -framework CoreServices -framework Foundation -framework Virtualization -framework vmnet -o $@ vmm/kido-vmm.m vmm/notify.c
 
+ifeq ($(TARGET_OS),darwin)
 sign: build
 	@set -e; for name in $(BINARIES); do \
 	  bin="$(OUT)/$$name"; \
@@ -83,23 +105,28 @@ sign: build
 	  codesign "$$@" "$$bin"; \
 	  codesign --verify --strict "$$bin"; \
 	done
+else
+sign: build
+	@echo "note: codesign is macOS-only; skipping sign for $(TARGET_OS)/$(TARGET_ARCH)" >&2
+endif
 
 # The release assets: the versioned tarball, install.sh and their SHA256SUMS.
-dist: sign
+dist: $(SIGN_DEP)
 	@if [ ! -f $(OUT)/kido-agent ]; then echo "error: $(OUT)/kido-agent is missing; a release needs the guest agent" >&2; exit 1; fi
 	rm -rf $(DIST_ROOT)
 	install -d $(DIST_ROOT)/bin $(DIST_ROOT)/libexec/kido $(DIST_ROOT)/share/doc/kido
 	install -m 0755 $(OUT)/kido $(DIST_ROOT)/bin/kido
 	install -m 0755 $(OUT)/kido-agent $(DIST_ROOT)/libexec/kido/kido-agent
+ifeq ($(TARGET_OS),darwin)
 	install -m 0755 $(OUT)/kido-vmm $(DIST_ROOT)/libexec/kido/kido-vmm
+endif
 	install -m 0644 README.md $(DIST_ROOT)/share/doc/kido/README.md
 	install -m 0644 LICENSE $(DIST_ROOT)/share/doc/kido/LICENSE
-	COPYFILE_DISABLE=1 tar -C $(DIST_ROOT) --no-mac-metadata --no-xattrs --no-acls \
-	  --uid 0 --gid 0 --uname root --gname wheel -czf $(DIST_TAR) bin libexec share
+	COPYFILE_DISABLE=1 tar -C $(DIST_ROOT) $(TAR_FLAGS) -czf $(DIST_TAR) bin libexec share
 	rm -rf $(DIST_ROOT)
 	install -m 0755 install.sh $(DISTDIR)/install.sh
 	rm -f $(DISTDIR)/SHA256SUMS $(DISTDIR)/SHA256SUMS.sig
-	cd $(DISTDIR) && shasum -a 256 $(DIST_NAME).tar.gz install.sh > SHA256SUMS
+	cd $(DISTDIR) && $(SHA256) $(DIST_NAME).tar.gz install.sh > SHA256SUMS
 	@cat $(DISTDIR)/SHA256SUMS
 
 sign-dist:
@@ -112,13 +139,15 @@ sign-dist:
 	  -s $(DISTDIR)/SHA256SUMS.sig < $(DISTDIR)/SHA256SUMS
 	@rm -f $(DISTDIR)/.allowed_signers
 
-install: sign
+install: $(SIGN_DEP)
 	install -d $(BINDIR) $(LIBEXECDIR) $(DOCDIR)
 	install -m 0755 $(OUT)/kido $(BINDIR)/kido
 	@if [ -f $(OUT)/kido-agent ]; then echo "install -m 0755 $(OUT)/kido-agent $(LIBEXECDIR)/kido-agent"; \
 	  install -m 0755 $(OUT)/kido-agent $(LIBEXECDIR)/kido-agent; \
 	else echo "note: $(OUT)/kido-agent was not built; not installing it" >&2; fi
+ifeq ($(TARGET_OS),darwin)
 	install -m 0755 $(OUT)/kido-vmm $(LIBEXECDIR)/kido-vmm
+endif
 	install -m 0644 README.md $(DOCDIR)/README.md
 	install -m 0644 LICENSE $(DOCDIR)/LICENSE
 
@@ -126,8 +155,13 @@ uninstall:
 	rm -f $(BINDIR)/kido $(LIBEXECDIR)/kido-agent $(LIBEXECDIR)/kido-vmm $(DOCDIR)/README.md $(DOCDIR)/LICENSE
 	-rmdir $(LIBEXECDIR) $(DOCDIR) 2>/dev/null
 
+ifeq ($(TARGET_OS),darwin)
 test: test-vmm
 	$(GO) test ./...
+else
+test:
+	$(GO) test ./...
+endif
 
 vet:
 	$(GO) vet ./...
@@ -136,15 +170,15 @@ clean:
 	rm -rf $(OUT) $(DISTDIR)
 
 help:
-	@echo "make              build $(OUT)/kido, $(OUT)/kido-agent and $(OUT)/kido-vmm (VERSION=$(VERSION))"
-	@echo "make sign         ad-hoc sign $(OUT)/*; DEVELOPER_ID='Developer ID Application: ...' for a release"
+	@echo "make              build $(BUILD_TARGETS) for $(TARGET_OS)/$(TARGET_ARCH) (VERSION=$(VERSION))"
+	@echo "make sign         ad-hoc sign $(OUT)/* on darwin; DEVELOPER_ID='Developer ID Application: ...' for a release"
 	@echo "make dist         $(DIST_TAR), $(DISTDIR)/install.sh and $(DISTDIR)/SHA256SUMS"
 	@echo "make sign-dist RELEASE_KEY=FILE   sign SHA256SUMS with ssh-keygen -Y sign"
 	@echo "make install      install into PREFIX=$(PREFIX) (DESTDIR is honored); then run: kido setup"
 	@echo "make uninstall    remove what install put there"
 	@echo "make test | vet   go test ./... | go vet ./..."
 	@echo "make clean        remove $(OUT)/ and $(DISTDIR)/"
-	@echo "OUT=DIR DISTDIR=DIR put builds and archives elsewhere; DEV_QEMU=PATH keeps a fallback QEMU"
+	@echo "TARGET_OS=linux TARGET_ARCH=arm64 cross-builds for Linux; OUT=DIR DISTDIR=DIR set output dirs"
 
 # notify.c's tests, with the address and undefined-behaviour sanitizers.
 test-vmm:
