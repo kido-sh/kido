@@ -154,10 +154,21 @@ and `kido inspect` lists each mount of a container with its mode, `live` or `cop
 
 Live mounts (beta):
 
-- Writes in the container reach the Mac as they are made, and changes on the Mac show up in the
-  container within about a second. Deletions and renames pass through both ways. Stores through a
-  mapped file reach the Mac when it is synced. Nothing is copied at start or stop, and
-  `kido commit` does not include the mounted files.
+- Writes in the container reach the Mac as they are made. Changes made on the Mac reach the
+  container within a few tens of milliseconds: kido watches the shared directories and tells the
+  container what changed, so its next look sees the change, and programs in it that watch files
+  with kqueue are woken. A watched file the Mac renames or replaces is reported as deleted. These
+  take up to a second instead: a change by a program on the Mac that keeps the file open while it
+  writes, since macOS reports it when the file is closed; a change inside 64 or more nested
+  directories of the mount; and a change to a file with several hard links, seen through a name
+  other than the one macOS reports. With an image from before notifications, or with
+  `KIDO_NO_NOTIFY=1`, every change on the Mac takes up to a second.
+- A program in the container that watches a file or directory can be woken more than once for one
+  change: a second time, about 15 ms later, for a change it made itself, when the Mac's report of
+  that change comes back, and for a change on the Mac that macOS reports in two steps.
+- Deletions and renames pass through both ways. Stores through a mapped file reach the Mac when it
+  is synced. Nothing is copied at start or stop, and `kido commit` does not include the mounted
+  files.
 - `:ro` (`readonly`) is enforced by the Mac: the container cannot change the directory.
 - In the container, files appear to belong to whichever user looks at them, and changing their
   owner has no effect. On the Mac, what the container creates belongs to you.
@@ -239,6 +250,7 @@ its RUN step.
 | `KIDO_QEMU` | Absolute path of `qemu-system-aarch64`; overrides what `kido setup` installed |
 | `KIDO_BACKEND` | `vz` (default) or `qemu` |
 | `KIDO_VMM` | Path of the `kido-vmm` helper for the vz backend |
+| `KIDO_NO_NOTIFY` | `1` turns off change notifications for live mounts: a change made on the Mac then reaches the container within about a second |
 | `KIDO_DEV_VIRTIOFS` | Development only: comma-separated `NAME=DIR`, `NAME=DIR:ro` or `NAME=DIR:rw` entries that every vz boot from that environment, builds excepted, attaches to the `kido` virtio-fs device. kido neither mounts nor syncs them, any root process in the container can mount them, and the names `m0`, `m1`, ... are kido's own |
 | `KIDO_VZ_SUBNET` | vmnet's NAT network for the vz backend when it is not `192.168.64.0/24` (IPv4, /16 to /29) |
 | `DOCKER_CONFIG` | Where registry credentials are read and stored (default `~/.docker`) |

@@ -32,6 +32,18 @@
   account. kido refuses nothing here: what to share is your choice. At every boot it checks that
   each mount's path still leads where it did, so a symbolic link placed through a live mount cannot
   send another mount elsewhere; a change made between that check and the boot is not caught.
+- **Change notifications.** To pass on changes made on the Mac, kido watches each live mount's
+  directory and sends the container's agent the paths that changed, with their type, permissions,
+  link count, size and times, over the agent's authenticated, encrypted channel. It reads those
+  beneath the shared directory only, never through a symbolic link, and nothing in the container
+  can make the Mac act on them. The container learns when the Mac changes a file in a shared
+  directory, which it could also learn by polling. Another container on the same network can
+  interrupt notifications; changes then take up to a second again. Anything on the Mac that can
+  write to a shared directory can make kido send, instead of paths, a notice that anything may have
+  changed, by changing many files at once, by using paths longer than 4096 bytes, or by making macOS
+  drop events; the container then checks again what it had cached, which costs time, never
+  correctness.
+  `KIDO_NO_NOTIFY=1` turns notifications off.
 - **Downloads.** `kido setup` fetches QEMU over HTTPS only and checks a SHA-256 pinned in the
   binary. It unpacks with size limits and does not follow links out of its directory.
 - **Releases.** Every release has a `SHA256SUMS` file, signed with the kido release key by
