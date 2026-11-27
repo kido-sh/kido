@@ -126,7 +126,7 @@ func (l *rateLog) printf(format string, args ...any) {
 	l.next = now.Add(time.Second)
 	msg := fmt.Sprintf(format, args...)
 	if l.dropped > 0 {
-		msg += fmt.Sprintf(" (and %d more refusals)", l.dropped)
+		msg += fmt.Sprintf(" (and %d more like it)", l.dropped)
 		l.dropped = 0
 	}
 	log.Print(msg)

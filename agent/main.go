@@ -36,6 +36,12 @@ type server struct {
 	refusals rateLog
 	halt     sync.Once
 	poweroff func()
+
+	mounts     mountTable
+	notifyMu   sync.Mutex
+	notifyConn net.Conn   // the one notify session
+	notifySend sync.Mutex // one batch at a time, also while a new session replaces the old
+	notifyLog  rateLog
 }
 
 func main() {
@@ -56,6 +62,7 @@ func main() {
 	s := &server{
 		conns:    make(chan struct{}, maxConns),
 		poweroff: poweroff,
+		mounts:   sysMounts{},
 	}
 	pub, err := proto.ParseKey(*key)
 	if err != nil {
@@ -193,6 +200,8 @@ func (s *server) serve(conn net.Conn) {
 		respond(proto.Response{OK: true, Version: proto.Version})
 	case proto.OpExec:
 		s.exec(conn, ch, req)
+	case proto.OpNotify:
+		s.notify(conn, ch, req, respond)
 	case proto.OpShutdown:
 		log.Printf("shutdown requested")
 		respond(proto.Response{OK: true, Version: proto.Version})
