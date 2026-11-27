@@ -12,7 +12,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	goruntime "runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -30,40 +29,12 @@ import (
 // proxies 127.0.0.1:AgentPort and the published ports to the guest's address on vmnet's NAT network
 // or on its user network (network.go), so the agent client is the same as with QEMU.
 const (
-	backendQEMU = "qemu"
-	backendVZ   = "vz"
-	vmmComm     = "kido-vmm"
+	vmmComm = "kido-vmm"
 	// vmnet's shared (NAT) network, unless /Library/Preferences/SystemConfiguration/com.apple.vmnet.plist
 	// (readable by root only) overrides it; KIDO_VZ_SUBNET then has to say so.
 	vzDefaultSubnet = "192.168.64.0/24"
 	dhcpLeases      = "/var/db/dhcpd_leases"
 )
-
-func BackendFromEnv() (string, error) {
-	return backendFromEnv(goruntime.GOOS, os.Getenv("KIDO_BACKEND"))
-}
-
-func backendFromEnv(goos, b string) (string, error) {
-	switch b {
-	case "":
-		if goos == "darwin" {
-			return backendVZ, nil
-		}
-		return backendQEMU, nil
-	case backendVZ:
-		if goos != "darwin" {
-			return "", fmt.Errorf("KIDO_BACKEND=%s requires macOS (Virtualization.framework is not available on %s); use %s", backendVZ, goos, backendQEMU)
-		}
-		return backendVZ, nil
-	case backendQEMU:
-		return backendQEMU, nil
-	default:
-		if goos != "darwin" {
-			return "", fmt.Errorf("KIDO_BACKEND=%q: must be %s on %s", b, backendQEMU, goos)
-		}
-		return "", fmt.Errorf("KIDO_BACKEND=%q: must be %s or %s", b, backendVZ, backendQEMU)
-	}
-}
 
 // DevVMM is a development build of kido-vmm, the last place VMMPath looks. It is empty unless the
 // build sets it with -X, as `make DEV_VMM=PATH` does.
@@ -77,7 +48,7 @@ func VMMPath() string {
 	}
 	exe, _ := os.Executable()
 	for _, p := range vmmCandidates(exe) {
-		if st, err := os.Stat(p); err == nil && st.Mode().IsRegular() {
+		if st, err := os.Stat(p); err == nil && st.Mode().IsRegular() && st.Mode().Perm()&0o111 != 0 {
 			return p
 		}
 	}
@@ -515,7 +486,14 @@ func (r *Runtime) vzCommit(ctx context.Context, info *Info, target, parent image
 	}
 	parentDir := parent.Dir(r.Home)
 	return r.storeImage(target, &imageJSON{RootUUID: info.RootUUID, Parent: parent.String(), Config: cfg}, func(tmp string) error {
-		if err := cloneFile(filepath.Join(dir, "disk.img"), filepath.Join(tmp, "disk.img")); err != nil {
+		cowPath := filepath.Join(dir, "disk.cow")
+		if _, err := os.Lstat(cowPath); err == nil {
+			if err := flattenCowOverlay(filepath.Join(dir, "base.img"), cowPath, filepath.Join(tmp, "disk.img")); err != nil {
+				return err
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		} else if err := cloneFile(filepath.Join(dir, "disk.img"), filepath.Join(tmp, "disk.img")); err != nil {
 			return err
 		}
 		for _, f := range []string{"kernel", "initrd.cpio"} {

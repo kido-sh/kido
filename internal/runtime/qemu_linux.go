@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"errors"
 	"fmt"
 	"os/exec"
 	goruntime "runtime"
@@ -10,6 +11,19 @@ func resolveQEMUCPUs(requested int, backend string) (int, error) {
 	mode, err := KVMModeFromEnv()
 	if err != nil {
 		return 0, err
+	}
+	if backend == backendKVM {
+		if mode == KVMModeTCG {
+			return 0, errors.New("KIDO_ACCEL=tcg is not supported by the kvm backend; unset KIDO_ACCEL or use KIDO_BACKEND=qemu")
+		}
+		plan, err := SelectLinuxKVMAffinity()
+		if err != nil {
+			return 0, err
+		}
+		if plan.MaxCPUs > kvmMaxCPUs {
+			plan.MaxCPUs = kvmMaxCPUs
+		}
+		return resolvePlanCPUs(requested, plan)
 	}
 	if mode == KVMModeTCG {
 		maxCPUs := goruntime.NumCPU()

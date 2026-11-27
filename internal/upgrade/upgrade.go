@@ -64,10 +64,10 @@ var payload = []struct {
 	{"bin/kido", 0o755},
 }
 
-var required = requiredFiles(goruntime.GOOS)
+var required = requiredFiles(goruntime.GOOS, goruntime.GOARCH)
 
-func requiredFiles(goos string) []string {
-	if goos == "darwin" {
+func requiredFiles(goos, goarch string) []string {
+	if goos == "darwin" || (goos == "linux" && goarch == "arm64") {
 		return []string{"bin/kido", "libexec/kido/kido-agent", "libexec/kido/kido-vmm"}
 	}
 	return []string{"bin/kido", "libexec/kido/kido-agent"}

@@ -1,7 +1,10 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -109,6 +112,12 @@ func TestCheckBackendAndKVMModes(t *testing.T) {
 	if r := checkBackend("qemu", nil, tcgMode, tcgErr); r.status != checkPass || !strings.Contains(r.detail, "TCG") {
 		t.Fatalf("whitespace tcg backend: got %+v", r)
 	}
+	if r := checkBackend("kvm", nil, runtime.KVMModeKVM, nil); r.status != checkPass || !strings.Contains(r.detail, "kido-vmm") {
+		t.Fatalf("native kvm backend: got %+v", r)
+	}
+	if r := checkBackend("kvm", nil, tcgMode, tcgErr); r.status != checkFail || !strings.Contains(r.detail, "KIDO_ACCEL=tcg") {
+		t.Fatalf("kvm backend with tcg accel: got %+v, want FAIL", r)
+	}
 
 	denied := runtime.KVMDiag{Err: fmt.Errorf("cannot open /dev/kvm: %w", unix.EACCES)}
 	if r := checkKVM(denied, runtime.KVMModeKVM, nil); r.status != checkFail {
@@ -192,5 +201,26 @@ func TestLinuxSystemParsers(t *testing.T) {
 	}
 	if accelHelpHasKVM("Accelerators supported in QEMU binary:\ntcg\n") {
 		t.Error("unexpected kvm in accel help")
+	}
+}
+
+func TestCheckLinuxVMMVersionFailureFails(t *testing.T) {
+	dir := t.TempDir()
+	bad := filepath.Join(dir, "bad-vmm")
+	if err := os.WriteFile(bad, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("KIDO_VMM", bad)
+	if r := checkLinuxVMM(context.Background()); r.status != checkFail {
+		t.Fatalf("broken kido-vmm got %+v, want FAIL", r)
+	}
+
+	good := filepath.Join(dir, "good-vmm")
+	if err := os.WriteFile(good, []byte("#!/bin/sh\necho kido-vmm 0.1.0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("KIDO_VMM", good)
+	if r := checkLinuxVMM(context.Background()); r.status != checkPass || !strings.Contains(r.detail, "kido-vmm 0.1.0") {
+		t.Fatalf("working kido-vmm got %+v, want PASS", r)
 	}
 }

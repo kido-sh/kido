@@ -12,30 +12,34 @@ import (
 
 func TestBackendFromEnv(t *testing.T) {
 	cases := []struct {
-		goos    string
-		env     string
-		want    string
-		wantErr string
+		goos     string
+		env      string
+		linuxKVM bool
+		want     string
+		wantErr  string
 	}{
-		{"darwin", "", backendVZ, ""},
-		{"darwin", "vz", backendVZ, ""},
-		{"darwin", "qemu", backendQEMU, ""},
-		{"darwin", "invalid", "", "must be vz or qemu"},
-		{"linux", "", backendQEMU, ""},
-		{"linux", "qemu", backendQEMU, ""},
-		{"linux", "vz", "", "requires macOS"},
-		{"linux", "invalid", "", "must be qemu on linux"},
+		{"darwin", "", false, backendVZ, ""},
+		{"darwin", "vz", false, backendVZ, ""},
+		{"darwin", "qemu", false, backendQEMU, ""},
+		{"darwin", "kvm", false, "", "requires Linux"},
+		{"darwin", "invalid", false, "", "must be vz or qemu"},
+		{"linux", "", false, backendQEMU, ""},
+		{"linux", "", true, backendKVM, ""},
+		{"linux", "kvm", false, backendKVM, ""},
+		{"linux", "qemu", true, backendQEMU, ""},
+		{"linux", "vz", true, "", "requires macOS"},
+		{"linux", "invalid", true, "", "must be kvm or qemu on linux"},
 	}
 	for _, tc := range cases {
-		got, err := backendFromEnv(tc.goos, tc.env)
+		got, err := backendFromEnv(tc.goos, tc.env, tc.linuxKVM)
 		if tc.wantErr != "" {
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-				t.Errorf("backendFromEnv(%q, %q) = %q, %v; want error containing %q", tc.goos, tc.env, got, err, tc.wantErr)
+				t.Errorf("backendFromEnv(%q, %q, %v) = %q, %v; want error containing %q", tc.goos, tc.env, tc.linuxKVM, got, err, tc.wantErr)
 			}
 			continue
 		}
 		if err != nil || got != tc.want {
-			t.Errorf("backendFromEnv(%q, %q) = %q, %v; want %q, nil", tc.goos, tc.env, got, err, tc.want)
+			t.Errorf("backendFromEnv(%q, %q, %v) = %q, %v; want %q, nil", tc.goos, tc.env, tc.linuxKVM, got, err, tc.want)
 		}
 	}
 }

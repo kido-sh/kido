@@ -2,6 +2,7 @@
 # Written for the GNU Make 3.81 that ships with macOS.
 
 GO          ?= go
+CARGO       ?= cargo
 HOST_OS     := $(shell $(GO) env GOHOSTOS)
 TARGET_OS   ?= $(if $(GOOS),$(GOOS),$(HOST_OS))
 TARGET_ARCH ?= $(if $(GOARCH),$(GOARCH),arm64)
@@ -33,11 +34,19 @@ BINARIES      := kido kido-agent kido-vmm
 BUILD_TARGETS := $(OUT)/kido $(OUT)/kido-agent $(OUT)/kido-vmm
 SIGN_DEP      := sign
 KIDO_ENV      := GOOS=$(TARGET_OS) GOARCH=$(TARGET_ARCH)
+HAVE_VMM      := yes
+else ifeq ($(TARGET_OS)-$(TARGET_ARCH),linux-arm64)
+BINARIES      := kido kido-agent kido-vmm
+BUILD_TARGETS := $(OUT)/kido $(OUT)/kido-agent $(OUT)/kido-vmm
+SIGN_DEP      := build
+KIDO_ENV      := CGO_ENABLED=0 GOOS=$(TARGET_OS) GOARCH=$(TARGET_ARCH)
+HAVE_VMM      := yes
 else
 BINARIES      := kido kido-agent
 BUILD_TARGETS := $(OUT)/kido $(OUT)/kido-agent
 SIGN_DEP      := build
 KIDO_ENV      := CGO_ENABLED=0 GOOS=$(TARGET_OS) GOARCH=$(TARGET_ARCH)
+HAVE_VMM      := no
 endif
 
 ifeq ($(HOST_OS),darwin)
@@ -51,6 +60,7 @@ ENTITLEMENTS := packaging/entitlements
 LDFLAGS      := -s -w -X main.version=$(VERSION) -X github.com/kido-sh/kido/internal/setup.DevQEMU=$(DEV_QEMU) -X github.com/kido-sh/kido/internal/runtime.DevVMM=$(DEV_VMM)
 GOBUILD       = $(GO) build -trimpath -ldflags '$(LDFLAGS)'
 GO_SOURCES   := $(shell find . -path ./.git -prune -o -name '*.go' -print) go.mod go.sum
+VMM_LINUX_SOURCES := $(shell find vmm-linux/src -name '*.rs' 2>/dev/null) vmm-linux/Cargo.toml vmm-linux/Cargo.lock vmm-linux/.cargo/config.toml
 HAVE_AGENT   := $(wildcard agent/*.go)
 
 BINDIR     = $(DESTDIR)$(PREFIX)/bin
@@ -86,11 +96,18 @@ $(OUT)/kido-agent: $(GO_SOURCES) $(OUT)/.version
 	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 $(GOBUILD) -o $@ ./agent
 endif
 
+ifeq ($(TARGET_OS),darwin)
 # The Virtualization.framework helper; `make sign` gives it com.apple.security.virtualization.
 $(OUT)/kido-vmm: vmm/kido-vmm.m vmm/notify.c vmm/notify.h
 	@mkdir -p $(OUT)
 	xcrun clang -fobjc-arc -O2 -Wall -Wextra -Wno-unused-parameter -mmacosx-version-min=13.0 \
 	  -framework CoreServices -framework Foundation -framework Virtualization -framework vmnet -o $@ vmm/kido-vmm.m vmm/notify.c
+else ifeq ($(TARGET_OS)-$(TARGET_ARCH),linux-arm64)
+$(OUT)/kido-vmm: $(VMM_LINUX_SOURCES)
+	@mkdir -p $(OUT)
+	cd vmm-linux && $(CARGO) build --release --locked --target aarch64-unknown-linux-musl
+	cp vmm-linux/target/aarch64-unknown-linux-musl/release/kido-vmm $@
+endif
 
 ifeq ($(TARGET_OS),darwin)
 sign: build
@@ -117,7 +134,7 @@ dist: $(SIGN_DEP)
 	install -d $(DIST_ROOT)/bin $(DIST_ROOT)/libexec/kido $(DIST_ROOT)/share/doc/kido
 	install -m 0755 $(OUT)/kido $(DIST_ROOT)/bin/kido
 	install -m 0755 $(OUT)/kido-agent $(DIST_ROOT)/libexec/kido/kido-agent
-ifeq ($(TARGET_OS),darwin)
+ifeq ($(HAVE_VMM),yes)
 	install -m 0755 $(OUT)/kido-vmm $(DIST_ROOT)/libexec/kido/kido-vmm
 endif
 	install -m 0644 README.md $(DIST_ROOT)/share/doc/kido/README.md
@@ -145,7 +162,7 @@ install: $(SIGN_DEP)
 	@if [ -f $(OUT)/kido-agent ]; then echo "install -m 0755 $(OUT)/kido-agent $(LIBEXECDIR)/kido-agent"; \
 	  install -m 0755 $(OUT)/kido-agent $(LIBEXECDIR)/kido-agent; \
 	else echo "note: $(OUT)/kido-agent was not built; not installing it" >&2; fi
-ifeq ($(TARGET_OS),darwin)
+ifeq ($(HAVE_VMM),yes)
 	install -m 0755 $(OUT)/kido-vmm $(LIBEXECDIR)/kido-vmm
 endif
 	install -m 0644 README.md $(DOCDIR)/README.md

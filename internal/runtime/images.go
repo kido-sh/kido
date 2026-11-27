@@ -269,7 +269,7 @@ func (r *Runtime) Commit(ctx context.Context, ref string, image string, cfg engi
 	if err != nil {
 		return nil, err
 	}
-	if info.Backend == backendVZ {
+	if info.Backend == backendVZ || info.Backend == backendKVM {
 		return r.vzCommit(ctx, info, target, parent, cfg)
 	}
 	parentDir := parent.Dir(r.Home)

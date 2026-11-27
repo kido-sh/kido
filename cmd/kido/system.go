@@ -46,6 +46,9 @@ func ctrBackendPath(rt *runtime.Runtime) string {
 	if rt.Backend == "" || rt.Backend == "qemu" {
 		return rt.QEMU
 	}
+	if rt.Backend == "kvm" {
+		return runtime.VMMPath()
+	}
 	return ""
 }
 

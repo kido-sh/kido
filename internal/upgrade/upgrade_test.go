@@ -96,7 +96,7 @@ func releaseFiles(version string) map[string]string {
 		"share/doc/kido/README.md": "readme " + version,
 		"share/doc/kido/LICENSE":   "license",
 	}
-	if goruntime.GOOS == "darwin" {
+	if goruntime.GOOS == "darwin" || (goruntime.GOOS == "linux" && goruntime.GOARCH == "arm64") {
 		m["libexec/kido/kido-vmm"] = "vmm " + version
 	}
 	return m
@@ -204,7 +204,7 @@ func TestUpgrade(t *testing.T) {
 		"libexec/kido/kido-agent": 0o755,
 		"share/doc/kido/LICENSE":  0o644,
 	}
-	if goruntime.GOOS == "darwin" {
+	if goruntime.GOOS == "darwin" || (goruntime.GOOS == "linux" && goruntime.GOARCH == "arm64") {
 		wantModes["libexec/kido/kido-vmm"] = 0o755
 	}
 	for name, mode := range wantModes {
@@ -260,7 +260,7 @@ func TestRefused(t *testing.T) {
 		return m
 	}
 	missingHelper := "libexec/kido/kido-agent"
-	if goruntime.GOOS == "darwin" {
+	if goruntime.GOOS == "darwin" || (goruntime.GOOS == "linux" && goruntime.GOARCH == "arm64") {
 		missingHelper = "libexec/kido/kido-vmm"
 	}
 	without := releaseFiles("0.2.0")
@@ -423,6 +423,7 @@ func TestLinuxTarballAndRequired(t *testing.T) {
 	linuxFiles := map[string]string{
 		"bin/kido":                 fakeKido("0.2.0"),
 		"libexec/kido/kido-agent":  "agent 0.2.0",
+		"libexec/kido/kido-vmm":    "vmm 0.2.0",
 		"share/doc/kido/README.md": "readme",
 		"share/doc/kido/LICENSE":   "license",
 	}
@@ -431,23 +432,36 @@ func TestLinuxTarballAndRequired(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	stagedFiles, err := stageFor(tgzPath, t.TempDir(), requiredFiles("linux"))
+	stagedFiles, err := stageFor(tgzPath, t.TempDir(), requiredFiles("linux", "arm64"))
 	if err != nil {
-		t.Fatalf("stageFor linux without kido-vmm: %v", err)
+		t.Fatalf("stageFor linux/arm64: %v", err)
 	}
 	if len(stagedFiles) != len(linuxFiles) {
 		t.Fatalf("staged %d files, want %d", len(stagedFiles), len(linuxFiles))
 	}
-	if _, err := stageFor(tgzPath, t.TempDir(), requiredFiles("darwin")); err == nil || !strings.Contains(err.Error(), "no libexec/kido/kido-vmm") {
-		t.Fatalf("darwin stage without kido-vmm: %v", err)
+
+	delete(linuxFiles, "libexec/kido/kido-vmm")
+	noVMMPath := filepath.Join(t.TempDir(), "no-vmm.tar.gz")
+	if err := os.WriteFile(noVMMPath, tarball(t, linuxFiles), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stageFor(noVMMPath, t.TempDir(), requiredFiles("linux", "arm64")); err == nil || !strings.Contains(err.Error(), "no libexec/kido/kido-vmm") {
+		t.Fatalf("linux/arm64 stage without kido-vmm: %v", err)
+	}
+	if _, err := stageFor(noVMMPath, t.TempDir(), requiredFiles("linux", "amd64")); err != nil {
+		t.Fatalf("linux/amd64 stage without kido-vmm: %v", err)
+	}
+	if _, err := stageFor(noVMMPath, t.TempDir(), requiredFiles("darwin", "arm64")); err == nil || !strings.Contains(err.Error(), "no libexec/kido/kido-vmm") {
+		t.Fatalf("darwin/arm64 stage without kido-vmm: %v", err)
 	}
 
+	linuxFiles["libexec/kido/kido-vmm"] = "vmm 0.2.0"
 	delete(linuxFiles, "libexec/kido/kido-agent")
 	noAgentPath := filepath.Join(t.TempDir(), "no-agent.tar.gz")
 	if err := os.WriteFile(noAgentPath, tarball(t, linuxFiles), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := stageFor(noAgentPath, t.TempDir(), requiredFiles("linux")); err == nil || !strings.Contains(err.Error(), "no libexec/kido/kido-agent") {
-		t.Fatalf("linux stage without kido-agent: %v", err)
+	if _, err := stageFor(noAgentPath, t.TempDir(), requiredFiles("linux", "arm64")); err == nil || !strings.Contains(err.Error(), "no libexec/kido/kido-agent") {
+		t.Fatalf("linux/arm64 stage without kido-agent: %v", err)
 	}
 }

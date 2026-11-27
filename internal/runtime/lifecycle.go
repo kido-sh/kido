@@ -489,6 +489,20 @@ func diskUsage(root string) int64 {
 
 // BackendVersion is the version line of the VM monitor that runs containers.
 func (r *Runtime) BackendVersion(ctx context.Context) (string, error) {
+	if r.Backend == backendKVM {
+		vmm := VMMPath()
+		if vmm == "" {
+			return "", nil
+		}
+		ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		out, err := exec.CommandContext(ctx, vmm, "--version").Output()
+		if err != nil {
+			return "", err
+		}
+		line, _, _ := strings.Cut(string(out), "\n")
+		return strings.TrimSpace(line), nil
+	}
 	if r.Backend != "" && r.Backend != backendQEMU {
 		return "", nil
 	}

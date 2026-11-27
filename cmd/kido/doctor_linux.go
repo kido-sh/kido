@@ -17,8 +17,8 @@ import (
 const doctorSummary = "Check that this Linux host can run kido containers"
 
 func doctorUsage() string {
-	return "\n\nChecks the Linux arm64 host, KVM, QEMU, KIDO_HOME, disk space, the local images and the\n" +
-		"registry credentials, and prints a fix for each problem. Exit status 1 when a check fails."
+	return "\n\nChecks the Linux arm64 host, KVM, kido-vmm or QEMU, KIDO_HOME, disk space, the local images\n" +
+		"and the registry credentials, and prints a fix for each problem. Exit status 1 when a check fails."
 }
 
 func doctorPlatformChecks(ctx context.Context, home, backend string, berr error) []checkResult {
@@ -30,7 +30,9 @@ func doctorPlatformChecks(ctx context.Context, home, backend string, berr error)
 		checkKVM(kvm, mode, merr),
 		checkBackend(backend, berr, mode, merr),
 	}
-	if berr == nil && backend == "qemu" {
+	if berr == nil && backend == "kvm" {
+		results = append(results, checkLinuxVMM(ctx))
+	} else if berr == nil && backend == "qemu" {
 		results = append(results, checkQEMU(ctx, home, mode, merr)...)
 	}
 	return results
@@ -126,18 +128,44 @@ func checkKVM(kvm runtime.KVMDiag, mode string, modeErr error) checkResult {
 func checkBackend(backend string, err error, mode string, modeErr error) checkResult {
 	const name = "Backend"
 	if err != nil {
-		return fail(name, err.Error(), "unset KIDO_BACKEND or set KIDO_BACKEND=qemu (vz is macOS-only)")
+		return fail(name, err.Error(), "unset KIDO_BACKEND or set KIDO_BACKEND=kvm or KIDO_BACKEND=qemu (vz is macOS-only)")
 	}
 	if backend == "vz" {
-		return fail(name, "vz (Virtualization.framework) is macOS-only", "unset KIDO_BACKEND or set KIDO_BACKEND=qemu")
+		return fail(name, "vz (Virtualization.framework) is macOS-only", "unset KIDO_BACKEND or set KIDO_BACKEND=kvm or KIDO_BACKEND=qemu")
 	}
 	if modeErr != nil {
 		return fail(name, modeErr.Error(), "unset KIDO_ACCEL or set it to auto, kvm, or tcg")
+	}
+	if backend == "kvm" {
+		if mode == runtime.KVMModeTCG {
+			return fail(name, "kvm: native kido-vmm requires /dev/kvm (KIDO_ACCEL=tcg is QEMU-only)", "unset KIDO_ACCEL or set KIDO_BACKEND=qemu")
+		}
+		return pass(name, "kvm: native Linux /dev/kvm VMM (kido-vmm)")
 	}
 	if mode == runtime.KVMModeTCG {
 		return pass(name, "qemu: QEMU with TCG (KIDO_ACCEL=tcg)")
 	}
 	return pass(name, "qemu: QEMU with KVM")
+}
+
+func checkLinuxVMM(ctx context.Context) checkResult {
+	const name = "VMM"
+	const fix = "install kido-vmm next to kido or in ../libexec/kido, set KIDO_VMM, or use KIDO_BACKEND=qemu"
+	p := runtime.VMMPath()
+	if p == "" {
+		return fail(name, "kido-vmm not found", fix)
+	}
+	if err := isExecutableFile(p); err != nil {
+		return fail(name, fmt.Sprintf("%s: %v", p, err), fix)
+	}
+	out, err := runFixed(ctx, nil, p, "--version")
+	if err != nil {
+		return fail(name, fmt.Sprintf("%s does not run: %v", p, err), fix)
+	}
+	if v := firstLine(out); v != "" {
+		return pass(name, v+": "+p)
+	}
+	return pass(name, p)
 }
 
 func checkQEMU(ctx context.Context, home, mode string, modeErr error) []checkResult {

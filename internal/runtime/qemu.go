@@ -80,7 +80,11 @@ func (r *Runtime) prepare(ctx context.Context, opts engine.CreateOptions) (*Info
 	}
 	if opts.Network != "" && opts.Network != NetworkNone {
 		if r.Backend != backendVZ {
-			return nil, fmt.Errorf("--network %s: networks need the vz backend (KIDO_BACKEND=vz); QEMU has the default network and none", opts.Network)
+			name := "QEMU"
+			if r.Backend == backendKVM {
+				name = "the kvm backend"
+			}
+			return nil, fmt.Errorf("--network %s: networks need the vz backend (KIDO_BACKEND=vz); %s has the default network and none", opts.Network, name)
 		}
 		n, err := r.GetNetwork(opts.Network)
 		if err != nil {
@@ -131,6 +135,9 @@ func (r *Runtime) prepare(ctx context.Context, opts engine.CreateOptions) (*Info
 		return nil, err
 	}
 	backing := filepath.Join(ref.Dir(r.Home), "disk.img")
+	if info.Backend == backendKVM {
+		return r.kvmPrepareDisk(info, backing)
+	}
 	if info.Backend == backendVZ {
 		return r.vzPrepareDisk(info, backing)
 	}
@@ -269,6 +276,9 @@ func (r *Runtime) Start(ctx context.Context, ref string) error {
 func (r *Runtime) boot(ctx context.Context, info *Info) error {
 	if info.Backend == backendVZ {
 		return r.vzBoot(ctx, info)
+	}
+	if info.Backend == backendKVM {
+		return r.kvmBoot(ctx, info)
 	}
 	ref, err := imageref.Parse(info.Image)
 	if err != nil {

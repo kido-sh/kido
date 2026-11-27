@@ -34,6 +34,12 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - name: rust target (aarch64-unknown-linux-musl)
+        run: rustup target add aarch64-unknown-linux-musl
+      - name: test kido-vmm (rust)
+        run: cd vmm-linux && RUSTFLAGS="-D warnings" cargo test --locked
+      - name: check kido-vmm (linux/arm64)
+        run: cd vmm-linux && cargo clippy --all-targets --locked --target aarch64-unknown-linux-musl -- -D warnings
       - name: vet (linux/arm64)
         run: GOOS=linux GOARCH=arm64 go vet ./...
       - name: dist (linux/arm64)
