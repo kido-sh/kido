@@ -146,6 +146,7 @@ else
   live=$KIDO_HOME/live
   mkdir -p "$live"
   check  "run -d live -v"         0 "$kido" run -d --name e2e-l -v "$live:/data" darwin sleep 600
+  checko "inspect: live mount"    0 "/data live" "$kido" inspect -f '{{range .Mounts}}{{.Target}} {{.Mode}}{{end}}' e2e-l
   echo host > "$live/host"
   checko "live: sees a Mac write" 0 "host" "$kido" exec e2e-l cat /data/host
   check  "live: writes"           0 "$kido" exec e2e-l /bin/sh -c 'echo guest > /data/guest'
@@ -164,6 +165,13 @@ else
   echo changed > "$live/guest"
   checko "file -v is a copy"      0 "guest" "$kido" exec e2e-f cat /etc/guest
   check  "rm -f file container"   0 "$kido" rm -f e2e-f
+  check  "run -d --copy-mounts"   0 "$kido" run -d --name e2e-cm --copy-mounts -v "$live:/data" darwin sleep 600
+  checko "inspect: copy mount"    0 "/data copy" "$kido" inspect -f '{{range .Mounts}}{{.Target}} {{.Mode}}{{end}}' e2e-cm
+  check  "copy: writes"           0 "$kido" exec e2e-cm /bin/sh -c 'echo copied > /data/copied'
+  check  "copy: not on the Mac yet" 1 test -e "$live/copied"
+  check  "stop copy container"    0 "$kido" stop e2e-cm
+  checko "copy: back after stop"  0 "copied" cat "$live/copied"
+  check  "rm copy container"      0 "$kido" rm e2e-cm
 fi
 probe=$KIDO_HOME/netprobe
 (cd "$root" && CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -o "$probe" ./test/netprobe) || exit 1
