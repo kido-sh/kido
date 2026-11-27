@@ -100,12 +100,23 @@ func TestMainArgs(t *testing.T) {
 }
 
 func TestSignal(t *testing.T) {
-	for in, want := range map[string]syscall.Signal{"KILL": 9, "sigterm": 15, "9": 9, "usr1": syscall.SIGUSR1, "HUP": 1} {
+	for in, want := range map[string]syscall.Signal{
+		"KILL":    9,
+		"sigterm": 15,
+		"TERM":    15,
+		"9":       9,
+		"usr1":    30,
+		"USR1":    30,
+		"SIGUSR2": 31,
+		"STOP":    17,
+		"HUP":     1,
+		" chld ":  20,
+	} {
 		if got, err := ctrSignal(in); err != nil || got != want {
 			t.Errorf("ctrSignal(%q) = %d, %v; want %d", in, got, err, want)
 		}
 	}
-	for _, in := range []string{"BOGUS", "0", "64", ""} {
+	for _, in := range []string{"BOGUS", "0", "32", "64", "-1", ""} {
 		if _, err := ctrSignal(in); err == nil {
 			t.Errorf("ctrSignal(%q) accepted", in)
 		}

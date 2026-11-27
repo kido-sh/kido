@@ -13,8 +13,6 @@ import (
 	"syscall"
 	"time"
 
-	"golang.org/x/sys/unix"
-
 	"github.com/kido-sh/kido/internal/engine"
 	"github.com/kido-sh/kido/internal/runtime"
 )
@@ -100,6 +98,42 @@ func ctrStartContainer(ctx context.Context, rt *runtime.Runtime, id string, spaw
 	return 0, nil
 }
 
+var darwinSignals = map[string]syscall.Signal{
+	"HUP":    1,
+	"INT":    2,
+	"QUIT":   3,
+	"ILL":    4,
+	"TRAP":   5,
+	"ABRT":   6,
+	"IOT":    6,
+	"EMT":    7,
+	"FPE":    8,
+	"KILL":   9,
+	"BUS":    10,
+	"SEGV":   11,
+	"SYS":    12,
+	"PIPE":   13,
+	"ALRM":   14,
+	"TERM":   15,
+	"URG":    16,
+	"STOP":   17,
+	"TSTP":   18,
+	"CONT":   19,
+	"CHLD":   20,
+	"CLD":    20,
+	"TTIN":   21,
+	"TTOU":   22,
+	"IO":     23,
+	"XCPU":   24,
+	"XFSZ":   25,
+	"VTALRM": 26,
+	"PROF":   27,
+	"WINCH":  28,
+	"INFO":   29,
+	"USR1":   30,
+	"USR2":   31,
+}
+
 func ctrSignal(s string) (syscall.Signal, error) {
 	s = strings.ToUpper(strings.TrimSpace(s))
 	if n, err := strconv.Atoi(s); err == nil {
@@ -108,13 +142,11 @@ func ctrSignal(s string) (syscall.Signal, error) {
 		}
 		return syscall.Signal(n), nil
 	}
-	if !strings.HasPrefix(s, "SIG") {
-		s = "SIG" + s
-	}
-	if sig := unix.SignalNum(s); sig != 0 {
+	name := strings.TrimPrefix(s, "SIG")
+	if sig, ok := darwinSignals[name]; ok {
 		return sig, nil
 	}
-	return 0, fmt.Errorf("invalid signal %s", strings.TrimPrefix(s, "SIG"))
+	return 0, fmt.Errorf("invalid signal %s", name)
 }
 
 func ctrKill(ctx context.Context, args []string) int {
