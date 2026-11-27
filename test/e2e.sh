@@ -139,6 +139,32 @@ echo hi > "$KIDO_HOME/vol/in"
 checko "run --rm -v :ro reads"  0 "hi" "$kido" run --rm -v "$KIDO_HOME/vol:/data:ro" darwin cat /data/in
 check  "run --rm -v writes"     0 "$kido" run --rm -v "$KIDO_HOME/vol:/data" darwin /bin/sh -c 'echo new > /data/new'
 checko "-v copied the write back" 0 "new" cat "$KIDO_HOME/vol/new"
+live_image=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("config", {}).get("labels", {}).get("sh.kido.virtiofs", ""))' "$img/image.json" 2>/dev/null)
+if [[ ${KIDO_BACKEND:-vz} != vz || $live_image != 1 ]]; then
+  echo "skip live mount checks: they need the vz backend and an image labelled sh.kido.virtiofs=1"
+else
+  live=$KIDO_HOME/live
+  mkdir -p "$live"
+  check  "run -d live -v"         0 "$kido" run -d --name e2e-l -v "$live:/data" darwin sleep 600
+  echo host > "$live/host"
+  checko "live: sees a Mac write" 0 "host" "$kido" exec e2e-l cat /data/host
+  check  "live: writes"           0 "$kido" exec e2e-l /bin/sh -c 'echo guest > /data/guest'
+  checko "live: on the Mac at once" 0 "guest" cat "$live/guest"
+  check  "live: removes"          0 "$kido" exec e2e-l rm /data/host
+  check  "live: gone on the Mac"  1 test -e "$live/host"
+  check  "live: restart"          0 "$kido" restart e2e-l
+  checko "live: mounted again"    0 "guest" "$kido" exec e2e-l cat /data/guest
+  check  "rm -f live container"   0 "$kido" rm -f e2e-l
+  checko "live :ro reads"         0 "guest" "$kido" run --rm -v "$live:/data:ro" darwin cat /data/guest
+  check  "live :ro refuses writes" 0 sh -c 'out=$("$1" run --rm -v "$2:/data:ro" darwin /bin/sh -c "echo x > /data/x" 2>&1) && exit 1; printf "%s" "$out" | grep -qi "read-only file system"' sh "$kido" "$live"
+  check  "live :ro wrote nothing" 1 test -e "$live/x"
+  check  "live --rm writes"       0 "$kido" run --rm -v "$live:/data" darwin /bin/sh -c 'echo last > /data/last'
+  checko "live --rm write landed" 0 "last" cat "$live/last"
+  check  "run -d file -v"         0 "$kido" run -d --name e2e-f -v "$live/guest:/etc/guest:ro" darwin sleep 600
+  echo changed > "$live/guest"
+  checko "file -v is a copy"      0 "guest" "$kido" exec e2e-f cat /etc/guest
+  check  "rm -f file container"   0 "$kido" rm -f e2e-f
+fi
 probe=$KIDO_HOME/netprobe
 (cd "$root" && CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -o "$probe" ./test/netprobe) || exit 1
 udp_port=$(python3 -c 'import socket; s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
