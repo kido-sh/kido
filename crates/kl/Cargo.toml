@@ -35,9 +35,9 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 ruzstd = "0.8"
 tar = { version = "0.4", default-features = false }
-ureq = "2"
+ureq = { version = "3", default-features = false, features = ["rustls-no-provider"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-rustls-pemfile = "2"
+rustix = { version = "1", default-features = false, features = ["std", "fs"] }
 zstd = { version = "0.13", optional = true }
 goblin = { version = "0.9", optional = true, default-features = false, features = ["std", "mach32", "mach64"] }
 
