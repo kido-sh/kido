@@ -513,3 +513,20 @@ func TestNotifyDialUsesThePinnedAgent(t *testing.T) {
 		t.Fatalf("an agent with no pinned identity got a request: %+v", g.req)
 	}
 }
+
+func TestRelayPendingSyntheticReplaceSameInode(t *testing.T) {
+	// Even when the filesystem immediately reuses the same inode number after
+	// rm + recreate of a known file, SyntheticReplaceID must mark Replaced and
+	// NameChanged so guest kqueue NOTE_DELETE watchers fire.
+	p := &relayPending{known: map[string]pathState{}}
+	file := uint32(unix.S_IFREG | 0o644)
+	rec1 := notify.Record{Path: "f", State: notify.Present, Mode: file}
+	p.judge(&rec1, 777, false)
+
+	p.ids = map[string][]uint64{"f": {notify.SyntheticReplaceID}}
+	rec2 := notify.Record{Path: "f", State: notify.Present, Mode: file}
+	p.judge(&rec2, 777, true)
+	if !rec2.Replaced || !rec2.NameChanged {
+		t.Fatalf("same-inode unlink+recreate with SyntheticReplaceID: got %+v, want Replaced && NameChanged", rec2)
+	}
+}

@@ -11,6 +11,7 @@ mod kvm;
 mod memory;
 mod mmio;
 mod net;
+mod notify;
 mod pci;
 mod pl011;
 mod pl031;
@@ -19,12 +20,15 @@ mod virtio;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::io::RawFd;
 use std::path::{Path, PathBuf};
 
 use crate::memory::{MAX_RAM_SIZE, MIN_RAM_SIZE};
 use crate::net::{parse_forward, parse_mac, ForwardSpec, DEFAULT_GUEST_MAC};
+use crate::notify::validate_notify_fd;
 use crate::pl011::DEFAULT_CONSOLE_MAX_BYTES;
 use crate::virtio::blk::DiskSyncMode;
+use crate::virtio::fs::{parse_share_spec, ShareConfig};
 use crate::virtio::metal::{DEFAULT_LINUX_GPU_MIB, MAX_GPU_MIB, MIN_GPU_MIB};
 
 #[derive(Debug, Clone)]
@@ -40,6 +44,9 @@ struct CliConfig {
     root_disk: Option<PathBuf>,
     root_disk_base: Option<PathBuf>,
     extra_disks: Vec<DiskSpec>,
+    shares: Vec<ShareConfig>,
+    notify_fd: Option<RawFd>,
+    watch_paths: Vec<PathBuf>,
     memory_mib: usize,
     cpus: usize,
     boot_args: String,
@@ -60,7 +67,8 @@ struct CliConfig {
 fn usage() -> ! {
     eprintln!(
         "usage: kido-vmm --kernel PATH --initrd PATH [--disk PATH [--disk-base PATH]] \
-         [--extra-disk PATH] [--extra-disk-ro PATH] [--memory MIB] [--cpus N] \
+         [--extra-disk PATH] [--extra-disk-ro PATH] [--share NAME=DIR] [--share-ro NAME=DIR] \
+         [--notify-fd N --watch DIR ...] [--memory MIB] [--cpus N] \
          [--boot-args STR | --cmdline-file PATH] [--console-log PATH | --console PATH] \
          [--console-max BYTES] [--pin-cpus LIST] [--state-file PATH] [--disk-sync full|none] \
          [--mac AA:BB:CC:DD:EE:FF] [--forward tcp|udp:HOST_IP:HOST_PORT:[GUEST_IP:]GUEST_PORT] \
@@ -78,6 +86,9 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<CliConfig, Stri
     let mut root_disk: Option<PathBuf> = None;
     let mut root_disk_base: Option<PathBuf> = None;
     let mut extra_disks: Vec<DiskSpec> = Vec::new();
+    let mut shares: Vec<ShareConfig> = Vec::new();
+    let mut notify_fd: Option<RawFd> = None;
+    let mut watch_paths: Vec<PathBuf> = Vec::new();
     let mut memory_mib: usize = 1024;
     let mut cpus: usize = 1;
     let mut boot_args: Option<String> = None;
@@ -119,6 +130,24 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<CliConfig, Stri
                 path: PathBuf::from(val),
                 read_only: true,
             }),
+            "--share" => shares.push(parse_share_spec(&val, false)?),
+            "--share-ro" => shares.push(parse_share_spec(&val, true)?),
+            "--notify-fd" => {
+                if notify_fd.is_some() {
+                    return Err("duplicate --notify-fd".to_string());
+                }
+                let fd = val
+                    .parse::<RawFd>()
+                    .map_err(|_| format!("invalid --notify-fd '{val}'"))?;
+                validate_notify_fd(fd)?;
+                notify_fd = Some(fd);
+            }
+            "--watch" => {
+                if !val.starts_with('/') {
+                    return Err(format!("bad --watch '{val}': not an absolute path"));
+                }
+                watch_paths.push(PathBuf::from(val));
+            }
             "--memory" => {
                 memory_mib = val
                     .parse::<usize>()
@@ -190,7 +219,13 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<CliConfig, Stri
             ));
         }
     }
-    let max_extra_disks = if gpu { 28 } else { 29 };
+    let mut seen_shares = std::collections::HashSet::new();
+    for sh in &shares {
+        if !seen_shares.insert(sh.name.as_str()) {
+            return Err(format!("duplicate share name '{}'", sh.name));
+        }
+    }
+    let max_extra_disks = 29 - usize::from(gpu) - usize::from(!shares.is_empty());
     if extra_disks.len() > max_extra_disks {
         return Err(format!(
             "too many extra disks ({}, max {max_extra_disks})",
@@ -207,6 +242,9 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<CliConfig, Stri
         root_disk,
         root_disk_base,
         extra_disks,
+        shares,
+        notify_fd,
+        watch_paths,
         memory_mib,
         cpus,
         boot_args: boot_args.unwrap_or_default(),
@@ -258,6 +296,38 @@ fn resolve_boot_args(cfg: &CliConfig) -> Result<String, String> {
 }
 
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+fn raise_nofile_limit() {
+    let mut rl = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut rl) } == 0 {
+        let target: libc::rlim_t = 131_072;
+        let desired = if rl.rlim_max == libc::RLIM_INFINITY {
+            target
+        } else {
+            rl.rlim_max.min(target)
+        };
+        if desired > rl.rlim_cur {
+            rl.rlim_cur = desired;
+            let _ = unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &rl) };
+        }
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+struct FsShutdownGuard(Option<std::sync::Arc<crate::virtio::fs::VirtioFs>>);
+
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+impl Drop for FsShutdownGuard {
+    fn drop(&mut self) {
+        if let Some(fs) = self.0.take() {
+            fs.shutdown();
+        }
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 fn run_vm(cfg: CliConfig) -> Result<(), String> {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
@@ -272,18 +342,36 @@ fn run_vm(cfg: CliConfig) -> Result<(), String> {
     use crate::memory::{GuestMemory, RAM_BASE};
     use crate::mmio::MmioBus;
     use crate::net::NetEngine;
+    use crate::notify::{close_raw_fd, NotifyHandle};
     use crate::pci::{pci_intx_spi, PciBus, ShmBarConfig};
     use crate::pl011::{ConsoleSink, Pl011};
     use crate::pl031::Pl031;
     use crate::virtio::blk::VirtioBlk;
+    use crate::virtio::fs::{VirtioFs, VirtioFsAdapter, DEFAULT_FS_TAG};
     use crate::virtio::metal::{VirtioMetal, VirtioMetalAdapter};
     use crate::virtio::net::{NetChannel, VirtioNet};
     use crate::virtio::pci::VirtioPciDevice;
 
+    raise_nofile_limit();
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_IGN);
         libc::prctl(libc::PR_SET_NAME, c"kido-vmm".as_ptr(), 0, 0, 0);
     }
+
+    let mut notify_handle: Option<NotifyHandle> = match cfg.notify_fd {
+        Some(fd) if cfg.watch_paths.is_empty() => {
+            close_raw_fd(fd);
+            None
+        }
+        Some(fd) => match NotifyHandle::start(fd, cfg.watch_paths.clone()) {
+            Ok(h) => Some(h),
+            Err(e) => {
+                eprintln!("kido-vmm: notifications off: {e}");
+                None
+            }
+        },
+        None => None,
+    };
 
     write_state(cfg.state_file.as_deref(), "starting");
     let mut boot_args = resolve_boot_args(&cfg)?;
@@ -424,8 +512,25 @@ fn run_vm(cfg: CliConfig) -> Result<(), String> {
         3
     };
 
+    let mut fs_dev = FsShutdownGuard(None);
+    let mut next_slot = extra_disk_slot_base;
+    if !cfg.shares.is_empty() {
+        let fs = VirtioFs::new(DEFAULT_FS_TAG, &cfg.shares)?;
+        let fs_slot = next_slot as u8;
+        let fs_spi = pci_intx_spi(fs_slot, 1);
+        let fs_vpci = Arc::new(VirtioPciDevice::new(
+            Box::new(VirtioFsAdapter(Arc::clone(&fs))),
+            Arc::clone(&mem),
+            spi_mux.line(fs_spi, fs_slot as u32),
+        ));
+        fs.start_workers(Arc::clone(&fs_vpci), Arc::clone(&mem))?;
+        fs_dev.0 = Some(fs);
+        pci_bus.add_virtio_device(fs_slot, fs_vpci)?;
+        next_slot += 1;
+    }
+
     for (i, spec) in cfg.extra_disks.iter().enumerate() {
-        let dev_num = (extra_disk_slot_base + i) as u8;
+        let dev_num = (next_slot + i) as u8;
         let blk = VirtioBlk::open(&spec.path, spec.read_only, cfg.disk_sync, disk_idx)?;
         disk_idx += 1;
         let spi = pci_intx_spi(dev_num, 1);
@@ -475,6 +580,12 @@ fn run_vm(cfg: CliConfig) -> Result<(), String> {
     net_shutdown.store(true, Ordering::Release);
     net_pause.wake_shutdown();
     let _ = net_handle.join();
+    if let Some(fs) = fs_dev.0.take() {
+        fs.shutdown();
+    }
+    if let Some(nh) = notify_handle.take() {
+        nh.shutdown();
+    }
     if let Some(metal) = metal_dev.take() {
         metal.shutdown();
     }
@@ -604,5 +715,81 @@ mod tests {
         let args = resolve_boot_args(&cfg).unwrap();
         assert_eq!(args, "serial=3 kido_secret=supersecret");
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn cli_parses_shares_and_rejects_invalid_or_duplicate() {
+        let cfg = parse_args(
+            [
+                "kido-vmm",
+                "--kernel",
+                "/k",
+                "--initrd",
+                "/i",
+                "--share",
+                "m0=/tmp/rw",
+                "--share-ro",
+                "m1=/tmp/ro",
+                "--watch",
+                "/tmp/rw",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap();
+        assert_eq!(cfg.shares.len(), 2);
+        assert_eq!(cfg.shares[0].name, "m0");
+        assert!(!cfg.shares[0].read_only);
+        assert_eq!(cfg.shares[1].name, "m1");
+        assert!(cfg.shares[1].read_only);
+        assert_eq!(cfg.watch_paths, vec![PathBuf::from("/tmp/rw")]);
+
+        // Duplicate share name rejected
+        assert!(parse_args(
+            [
+                "kido-vmm",
+                "--kernel",
+                "/k",
+                "--initrd",
+                "/i",
+                "--share",
+                "m0=/tmp/a",
+                "--share-ro",
+                "m0=/tmp/b",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .is_err());
+
+        // Relative share path or traversal share name rejected
+        assert!(parse_args(
+            [
+                "kido-vmm",
+                "--kernel",
+                "/k",
+                "--initrd",
+                "/i",
+                "--share",
+                "../evil=/tmp/a",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .is_err());
+        assert!(parse_args(
+            [
+                "kido-vmm",
+                "--kernel",
+                "/k",
+                "--initrd",
+                "/i",
+                "--share",
+                "m0=relative/dir",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .is_err());
     }
 }

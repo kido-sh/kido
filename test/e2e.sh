@@ -140,8 +140,8 @@ checko "run --rm -v :ro reads"  0 "hi" "$kido" run --rm -v "$KIDO_HOME/vol:/data
 check  "run --rm -v writes"     0 "$kido" run --rm -v "$KIDO_HOME/vol:/data" darwin /bin/sh -c 'echo new > /data/new'
 checko "-v copied the write back" 0 "new" cat "$KIDO_HOME/vol/new"
 live_image=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("config", {}).get("labels", {}).get("sh.kido.virtiofs", ""))' "$img/image.json" 2>/dev/null)
-if [[ ${KIDO_BACKEND:-vz} != vz || $live_image != 1 ]]; then
-  echo "skip live mount checks: they need the vz backend and an image labelled sh.kido.virtiofs=1"
+if [[ (${KIDO_BACKEND:-vz} != vz && ${KIDO_BACKEND:-vz} != kvm) || $live_image != 1 ]]; then
+  echo "skip live mount checks: they need the vz or kvm backend and an image labelled sh.kido.virtiofs=1"
 else
   live=$KIDO_HOME/live
   mkdir -p "$live"

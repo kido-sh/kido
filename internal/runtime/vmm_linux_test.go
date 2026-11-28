@@ -31,7 +31,7 @@ func TestKVMBootArgs(t *testing.T) {
 			{Protocol: "udp", HostIP: "127.0.0.1", HostPort: 9999, GuestPort: 9999},
 		},
 	}
-	args := kvmBootArgs(info, "/img", "02:dc:72:a1:b2:c3", 41234, []int{4, 5, 6, 7}, []string{"--extra-disk", "m0.img"}, false)
+	args := kvmBootArgs(info, "/img", "02:dc:72:a1:b2:c3", 41234, []int{4, 5, 6, 7}, []string{"--extra-disk", "m0.img", "--share", "m1=/srv/rw", "--share-ro", "m2=/srv/ro"}, false)
 	for _, want := range []string{
 		"--kernel", "/img/kernel",
 		"--initrd", "/img/initrd.cpio",
@@ -43,6 +43,8 @@ func TestKVMBootArgs(t *testing.T) {
 		"tcp:127.0.0.1:8080:10.0.2.15:80",
 		"udp:127.0.0.1:9999:10.0.2.15:9999",
 		"--extra-disk", "m0.img",
+		"--share", "m1=/srv/rw",
+		"--share-ro", "m2=/srv/ro",
 	} {
 		if !slices.Contains(args, want) {
 			t.Errorf("kvmBootArgs missing %q in %v", want, args)

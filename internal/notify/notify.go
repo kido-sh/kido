@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"strings"
 )
 
@@ -20,6 +21,11 @@ const (
 	KindFlush uint32 = 2
 
 	MaxPath = 4096 // longest path kido-vmm sends; longer ones arrive as flushes
+
+	// SyntheticReplaceID is attached by the Linux inotify watcher to IN_MOVED_TO and IN_DELETE
+	// events so the relay always recognizes an atomic replace or unlink+recreate even when the
+	// file was not yet recorded in known or when the filesystem reuses the same inode number.
+	SyntheticReplaceID uint64 = math.MaxUint64
 )
 
 // FSEvents flags that mean events were lost or the watched tree changed shape.

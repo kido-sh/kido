@@ -1,4 +1,5 @@
 pub mod blk;
+pub mod fs;
 pub mod metal;
 pub mod net;
 pub mod pci;

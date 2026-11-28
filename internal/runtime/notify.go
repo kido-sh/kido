@@ -232,7 +232,7 @@ func (p *relayPending) judge(rec *notify.Record, ino uint64, flagged bool) {
 	}
 	cur := pathState{present: rec.State == notify.Present, dir: rec.Mode&unix.S_IFMT == unix.S_IFDIR, ino: ino}
 	other := slices.ContainsFunc(p.ids[rel], func(id uint64) bool {
-		return id != ino && (!known || !prev.present || id == prev.ino)
+		return id == notify.SyntheticReplaceID || (id != ino && (!known || !prev.present || id == prev.ino))
 	})
 	switch {
 	case cur.present && (other || known && prev.present && prev.ino != ino):

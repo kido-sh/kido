@@ -7,6 +7,7 @@ use crate::virtio::pci::VirtioPciDevice;
 pub const PCI_VENDOR_VIRTIO: u16 = 0x1af4;
 pub const PCI_DEVICE_VIRTIO_NET: u16 = 0x1041;
 pub const PCI_DEVICE_VIRTIO_BLK: u16 = 0x1042;
+pub const PCI_DEVICE_VIRTIO_FS: u16 = 0x105a;
 pub const PCI_DEVICE_VIRTIO_METAL: u16 = 0x1090;
 
 const HOST_BRIDGE_VENDOR: u16 = 0x1b36;

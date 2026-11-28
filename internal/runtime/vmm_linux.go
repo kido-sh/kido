@@ -219,8 +219,12 @@ func (r *Runtime) kvmBoot(ctx context.Context, info *Info) error {
 	if err != nil {
 		return err
 	}
-	if len(shares) > 0 {
-		return fmt.Errorf("live virtio-fs shares are not yet supported by the Linux kvm backend; recreate with copy mounts")
+	if info.Labels[BuildLabel] == "" {
+		dev, err := devShares(os.Getenv("KIDO_DEV_VIRTIOFS"))
+		if err != nil {
+			return err
+		}
+		margs = append(margs, dev...)
 	}
 	for _, f := range []string{"console.log", "vmm.log"} {
 		if err := os.WriteFile(filepath.Join(dir, f), nil, 0o600); err != nil {
@@ -232,6 +236,11 @@ func (r *Runtime) kvmBoot(ctx context.Context, info *Info) error {
 		return err
 	}
 	defer vlog.Close()
+	nb, err := openNotify(shares, vlog)
+	if err != nil {
+		return err
+	}
+	defer nb.close()
 
 	bootArgs := strings.Join(slices.Concat([]string{
 		"serial=3", "kido_rtc_wait=5", "kido_rtc_delay=0", "kido_quiet_wait=0",
@@ -251,14 +260,24 @@ func (r *Runtime) kvmBoot(ctx context.Context, info *Info) error {
 		return err
 	}
 	args := kvmBootArgs(info, ref.Dir(r.Home), kvmMAC(info.ID), agentPort, plan.PinCPUs, margs, cow)
+	var extra []*os.File
+	if nb != nil {
+		args = append(args, nb.vmmArgs(3+len(extra))...)
+		extra = append(extra, nb.w)
+	}
 	cmd := exec.Command(vmm, args...)
 	cmd.Dir = dir
 	cmd.Stdout = vlog
 	cmd.Stderr = vlog
+	cmd.ExtraFiles = extra
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
 		os.Remove(filepath.Join(dir, "boot-args"))
 		return fmt.Errorf("start %s: %w", vmm, err)
+	}
+	if nb != nil {
+		nb.w.Close()
+		nb.w = nil
 	}
 	exited := make(chan struct{})
 	go func() {
@@ -289,6 +308,9 @@ func (r *Runtime) kvmBoot(ctx context.Context, info *Info) error {
 	os.Remove(filepath.Join(dir, "boot-args"))
 	if err == nil {
 		if err = mount.Populate(ctx, dir, r.mountGuest(info.ID)); err == nil {
+			if nb != nil {
+				r.startRelay(info.ID, dir, nb, vlog)
+			}
 			return nil
 		}
 		cmd.Process.Kill()
