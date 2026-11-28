@@ -405,12 +405,14 @@ fn run_vm(cfg: CliConfig) -> Result<(), String> {
             Arc::clone(&mem),
             spi_mux.line(metal_spi, 3),
         ));
-        let shm_mapper = vm.shm_mapper(1, metal.shm_backing());
-        metal.start_worker(
-            Arc::clone(&metal_vpci),
-            Arc::clone(&mem),
-            Some(Arc::clone(&shm_mapper) as Arc<dyn crate::virtio::metal::ShmDirtySync>),
-        )?;
+        let dma_coherent = metal.is_dma_coherent();
+        let shm_mapper = vm.shm_mapper(1, metal.shm_backing(), dma_coherent);
+        let dirty_sync = if dma_coherent {
+            None
+        } else {
+            Some(Arc::clone(&shm_mapper) as Arc<dyn crate::virtio::metal::ShmDirtySync>)
+        };
+        metal.start_worker(Arc::clone(&metal_vpci), Arc::clone(&mem), dirty_sync)?;
         let shm_cfg = ShmBarConfig::new(
             metal.shm_size(),
             shm_mapper as Arc<dyn crate::pci::ShmRegionMapper>,

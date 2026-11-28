@@ -187,6 +187,7 @@ pub struct KvmShmMapper {
     host_page_size: usize,
     manual_dirty_clear: bool,
     allow_dirty_log: bool,
+    dma_coherent: bool,
     state: Mutex<ShmMapState>,
 }
 
@@ -238,6 +239,9 @@ fn arm64_dsb_sy() {
 #[cfg(target_os = "linux")]
 impl KvmShmMapper {
     fn flush_full_shm_to_poc(&self) {
+        if self.dma_coherent {
+            return;
+        }
         #[cfg(target_arch = "aarch64")]
         {
             let size = self.backing.size() as usize;
@@ -765,10 +769,16 @@ impl KvmVm {
         })
     }
 
-    pub fn shm_mapper(&self, slot: u32, backing: Arc<ShmBacking>) -> Arc<KvmShmMapper> {
+    pub fn shm_mapper(
+        &self,
+        slot: u32,
+        backing: Arc<ShmBacking>,
+        dma_coherent: bool,
+    ) -> Arc<KvmShmMapper> {
         let ps = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
         let host_page_size = if ps > 0 { ps as usize } else { 4096 };
-        let allow_dirty_log = std::env::var_os("KIDO_VMM_NO_DIRTY_LOG").is_none();
+        let allow_dirty_log =
+            !dma_coherent && std::env::var_os("KIDO_VMM_NO_DIRTY_LOG").is_none();
         Arc::new(KvmShmMapper {
             vm: Arc::clone(&self.vm),
             slot,
@@ -776,6 +786,7 @@ impl KvmVm {
             host_page_size,
             manual_dirty_clear: self.manual_dirty_clear,
             allow_dirty_log,
+            dma_coherent,
             state: Mutex::new(ShmMapState {
                 gpa: None,
                 dirty_log_enabled: false,

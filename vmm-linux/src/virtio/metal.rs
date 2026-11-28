@@ -26,6 +26,8 @@ pub const KMTL_PCI_CLASS_CODE: u32 = 0x030200;
 pub const KMTL_OP_GET_DEVICE_INFO: u32 = 1;
 pub const KMTL_OP_COMMIT_COMMAND_BUFFER: u32 = 40;
 
+pub const KMTL_FEAT_DMA_COHERENT: u32 = 1 << 4;
+
 pub const KMTL_FRAME_GUEST_RPC: u8 = 0;
 pub const KMTL_FRAME_VMM_RESET: u8 = 1;
 pub const KMTL_FRAME_GUEST_RPC_PREFLUSHED: u8 = 2;
@@ -416,10 +418,12 @@ impl VirtioMetal {
                             .position(|&b| b == 0)
                             .unwrap_or(128.min(extra.len()));
                         let name = String::from_utf8_lossy(&extra[..name_end]);
+                        let coherent = (read_u32_le(&cfg, 12) & KMTL_FEAT_DMA_COHERENT) != 0;
                         eprintln!(
-                            "kido-vmm: virtio-metal ready: {} (shm {} MiB)",
+                            "kido-vmm: virtio-metal ready: {} (shm {} MiB, dma-coherent={})",
                             name,
-                            shm_bytes >> 20
+                            shm_bytes >> 20,
+                            if coherent { "yes" } else { "no" }
                         );
                         cfg
                     }
@@ -462,6 +466,10 @@ impl VirtioMetal {
 
     pub fn shm_size(&self) -> u64 {
         self.shm.size()
+    }
+
+    pub fn is_dma_coherent(&self) -> bool {
+        (read_u32_le(&self.dev_config, 12) & KMTL_FEAT_DMA_COHERENT) != 0
     }
 
     pub fn start_worker(
@@ -866,6 +874,11 @@ mod tests {
         assert_eq!(read_u32_le(&cfg, 40), 1024);
         assert_eq!(read_u32_le(&cfg, 52), 32768);
         assert_eq!(read_u64_le(&cfg, 56), 0x1234_5678);
+
+        // Verify KMTL_FEAT_DMA_COHERENT propagates through device config flags.
+        info[188..192].copy_from_slice(&(1u32 | KMTL_FEAT_DMA_COHERENT).to_le_bytes());
+        let cfg_coh = make_device_config_from_info(&info, shm).unwrap();
+        assert_ne!(read_u32_le(&cfg_coh, 12) & KMTL_FEAT_DMA_COHERENT, 0);
     }
 
     #[test]
