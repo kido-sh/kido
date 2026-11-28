@@ -482,7 +482,7 @@ define void @bad_i24(ptr addrspace(1) %p) {
   const uint32_t all_sg = AIR2SPV_SUBGROUP_BASIC | AIR2SPV_SUBGROUP_VOTE |
                           AIR2SPV_SUBGROUP_ARITHMETIC | AIR2SPV_SUBGROUP_BALLOT |
                           AIR2SPV_SUBGROUP_SHUFFLE | AIR2SPV_SUBGROUP_SHUFFLE_RELATIVE;
-  air2spv_caps_t caps = {true, true, true, true, true, false, 32768, all_sg};
+  air2spv_caps_t caps = {true, true, true, true, true, false, 32768, all_sg, 32};
   air2spv_result_t res{};
 
   CHECK_OK(air2spv_compile_metallib(fat_mlib.data(), fat_mlib.size(), "fc_saxpy", &caps, &res, err,
@@ -493,7 +493,7 @@ define void @bad_i24(ptr addrspace(1) %p) {
   std::free(res.spirv);
 
   /* Also verify zero-Int64 profile (Broadcom V3D 7.1 has shaderInt64 = false). */
-  air2spv_caps_t caps_no64 = {true, true, true, true, true, false, 32768, all_sg};
+  air2spv_caps_t caps_no64 = {true, true, true, true, true, false, 32768, all_sg, 32};
   CHECK_OK(air2spv_compile_metallib(mlib.data(), mlib.size(), "rmsnorm_fp32", &caps_no64, &res,
                                     err, sizeof(err)), err);
   assert(res.binding_mask == 0x0Fu);
@@ -509,7 +509,7 @@ define void @bad_i24(ptr addrspace(1) %p) {
   std::free(res.spirv);
 
   /* Capability gating: fp16_simd must fail cleanly when subgroup_ops lacks arithmetic. */
-  air2spv_caps_t caps_nosg = {true, true, true, true, true, false, 32768, 0};
+  air2spv_caps_t caps_nosg = {true, true, true, true, true, false, 32768, 0, 32};
   assert(!air2spv_compile_metallib(mlib.data(), mlib.size(), "fp16_simd", &caps_nosg, &res, err,
                                    sizeof(err)));
 
@@ -867,7 +867,7 @@ void test_external_metallib_file(const char *path) {
   const uint32_t all_sg = AIR2SPV_SUBGROUP_BASIC | AIR2SPV_SUBGROUP_VOTE |
                           AIR2SPV_SUBGROUP_ARITHMETIC | AIR2SPV_SUBGROUP_BALLOT |
                           AIR2SPV_SUBGROUP_SHUFFLE | AIR2SPV_SUBGROUP_SHUFFLE_RELATIVE;
-  air2spv_caps_t caps = {true, true, true, true, true, false, 32768, all_sg};
+  air2spv_caps_t caps = {true, true, true, true, true, false, 32768, all_sg, 32};
   size_t compiled = 0;
   for (size_t i = 0; i < idx.count; i++) {
     if (idx.funcs[i].fn_type != METALLIB_FN_COMPUTE) continue;

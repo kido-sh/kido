@@ -115,7 +115,7 @@ int main(void) {
       "  #include \"/etc/passwd\"\nkernel void k(uint i [[thread_position_in_grid]]) {}\n",
       "#\\\ninclude \"/etc/passwd\"\nkernel void k(uint i [[thread_position_in_grid]]) {}\n",
       "kernel void k(uint i [[thread_position_in_grid]]) {\n#include \"/etc/passwd\"\n}\n",
-      "constant uint X [[function_constant(1000)]];\nkernel void k(uint i [[thread_position_in_grid]]) {}\n",
+      "constant uint X [[function_constant(65536)]];\nkernel void k(uint i [[thread_position_in_grid]]) {}\n",
       "kernel void k(device float *a [[buffer(abc)]]) {}\n",
       "int x;\r#extension GL_ARB_shading_language_include : enable\r#include \"/etc/passwd\"\nkernel void k(uint i [[thread_position_in_grid]]) {}\n",
       "\f#extension GL_ARB_shading_language_include : enable\nkernel void k(uint i [[thread_position_in_grid]]) {}\n",

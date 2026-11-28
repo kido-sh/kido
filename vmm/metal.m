@@ -294,7 +294,9 @@ static NSData *_Nullable encodeFunctionNames(id<MTLLibrary> lib, uint32_t maxByt
     return nil;
   }
 
-  _deviceQueue = dispatch_queue_create("sh.kido.vmm.metal", DISPATCH_QUEUE_SERIAL);
+  dispatch_queue_attr_t qattr =
+      dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0);
+  _deviceQueue = dispatch_queue_create("sh.kido.vmm.metal", qattr);
   _inFlightGroup = dispatch_group_create();
   _nextHandle = 1;
   _nextSessionToken = 1;
@@ -1510,7 +1512,10 @@ static BOOL validateThreadgroupDims(id<MTLDevice> gpu,
           bad = YES;
           break;
         }
-        compEnc = [cb computeCommandEncoder];
+        MTLDispatchType dtype = (hdr.flags == (uint16_t)MTLDispatchTypeConcurrent)
+                                    ? MTLDispatchTypeConcurrent
+                                    : MTLDispatchTypeSerial;
+        compEnc = [cb computeCommandEncoderWithDispatchType:dtype];
         currentPSO = nil;
         for (uint32_t i = 0; i < KMTL_MAX_BUFFER_SLOTS; i++) {
           boundBuffers[i] = nil;

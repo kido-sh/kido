@@ -791,6 +791,10 @@ static dispatch_source_t onSignal(int sig, void (^handler)(void)) {
 
 int main(int argc, const char **argv) {
   @autoreleasepool {
+    id activity = [NSProcessInfo.processInfo
+        beginActivityWithOptions:(NSActivityUserInitiatedAllowingIdleSystemSleep | NSActivityLatencyCritical)
+                          reason:@"kido-vmm VM and GPU execution"];
+    (void)activity;
     gStarted = [NSDate date];
     signal(SIGPIPE, SIG_IGN);
     if (argc > 1 && !strcmp(argv[1], "hold-network")) return holdNetworkMain(argc - 2, argv + 2);

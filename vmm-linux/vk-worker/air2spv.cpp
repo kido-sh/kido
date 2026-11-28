@@ -188,6 +188,7 @@ struct FuncConstInfo {
   uint32_t spec_id = 0;
   llvm::Type *type = nullptr;
   uint32_t spv_id = 0;
+  bool is_air_bool = false;
 };
 
 struct SpvEmitter {
@@ -204,6 +205,16 @@ struct SpvEmitter {
   uint32_t spec_ly = 0;
   uint32_t spec_lz = 0;
   uint32_t wg_size_v3 = 0;
+  uint32_t pc_var_id = 0;
+  uint32_t pc_ptr_u32_ty = 0;
+  uint32_t sg32_f32_var = 0;
+  uint32_t sg32_f32_ptr_ty = 0;
+  uint32_t sg32_u32_var = 0;
+  uint32_t sg32_u32_ptr_ty = 0;
+  uint32_t sg32_shuf_f32_var = 0;
+  uint32_t sg32_shuf_f32_ptr_ty = 0;
+  uint32_t sg32_shuf_u32_var = 0;
+  uint32_t sg32_shuf_u32_ptr_ty = 0;
 
   /* Type deduplication */
   uint32_t ty_void = 0;
@@ -738,6 +749,87 @@ struct SpvEmitter {
     *out_ptr_elem_ty = get_ptr(sc, ety);
     return var_id;
   }
+
+  uint32_t get_ptr_pc_var() {
+    if (pc_var_id) return pc_var_id;
+    uint32_t u32 = get_int(32);
+    uint32_t c16 = get_const_u32(16u);
+    uint32_t arr_ty = alloc_id();
+    emit_op(types_consts_vars, spv::OpTypeArray, {arr_ty, u32, c16});
+    decorate(arr_ty, spv::DecorationArrayStride, {4u});
+    uint32_t st_ty = alloc_id();
+    emit_op(types_consts_vars, spv::OpTypeStruct, {st_ty, arr_ty, arr_ty});
+    decorate(st_ty, spv::DecorationBlock, {});
+    member_decorate(st_ty, 0u, spv::DecorationOffset, {0u});
+    member_decorate(st_ty, 1u, spv::DecorationOffset, {64u});
+    uint32_t ptr_st = get_ptr(spv::StorageClassPushConstant, st_ty);
+    pc_ptr_u32_ty = get_ptr(spv::StorageClassPushConstant, u32);
+    pc_var_id = alloc_id();
+    emit_op(types_consts_vars, spv::OpVariable,
+            {ptr_st, pc_var_id, static_cast<uint32_t>(spv::StorageClassPushConstant)});
+    interface_vars.push_back(pc_var_id);
+    return pc_var_id;
+  }
+
+  uint32_t get_sg32_scratch(bool is_fp, uint32_t *out_elem_ptr_ty) {
+    if (is_fp) {
+      if (!sg32_f32_var) {
+        uint32_t f32 = get_float(32);
+        uint32_t arr_ty = get_array(f32, 64u);
+        uint32_t ptr_arr = get_ptr(spv::StorageClassWorkgroup, arr_ty);
+        sg32_f32_ptr_ty = get_ptr(spv::StorageClassWorkgroup, f32);
+        sg32_f32_var = alloc_id();
+        emit_op(types_consts_vars, spv::OpVariable,
+                {ptr_arr, sg32_f32_var, static_cast<uint32_t>(spv::StorageClassWorkgroup)});
+        interface_vars.push_back(sg32_f32_var);
+      }
+      *out_elem_ptr_ty = sg32_f32_ptr_ty;
+      return sg32_f32_var;
+    } else {
+      if (!sg32_u32_var) {
+        uint32_t u32 = get_int(32);
+        uint32_t arr_ty = get_array(u32, 64u);
+        uint32_t ptr_arr = get_ptr(spv::StorageClassWorkgroup, arr_ty);
+        sg32_u32_ptr_ty = get_ptr(spv::StorageClassWorkgroup, u32);
+        sg32_u32_var = alloc_id();
+        emit_op(types_consts_vars, spv::OpVariable,
+                {ptr_arr, sg32_u32_var, static_cast<uint32_t>(spv::StorageClassWorkgroup)});
+        interface_vars.push_back(sg32_u32_var);
+      }
+      *out_elem_ptr_ty = sg32_u32_ptr_ty;
+      return sg32_u32_var;
+    }
+  }
+
+  uint32_t get_sg32_shuf_scratch(bool is_fp, uint32_t *out_elem_ptr_ty) {
+    if (is_fp) {
+      if (!sg32_shuf_f32_var) {
+        uint32_t f32 = get_float(32);
+        uint32_t arr_ty = get_array(f32, 1024u);
+        uint32_t ptr_arr = get_ptr(spv::StorageClassWorkgroup, arr_ty);
+        sg32_shuf_f32_ptr_ty = get_ptr(spv::StorageClassWorkgroup, f32);
+        sg32_shuf_f32_var = alloc_id();
+        emit_op(types_consts_vars, spv::OpVariable,
+                {ptr_arr, sg32_shuf_f32_var, static_cast<uint32_t>(spv::StorageClassWorkgroup)});
+        interface_vars.push_back(sg32_shuf_f32_var);
+      }
+      *out_elem_ptr_ty = sg32_shuf_f32_ptr_ty;
+      return sg32_shuf_f32_var;
+    } else {
+      if (!sg32_shuf_u32_var) {
+        uint32_t u32 = get_int(32);
+        uint32_t arr_ty = get_array(u32, 1024u);
+        uint32_t ptr_arr = get_ptr(spv::StorageClassWorkgroup, arr_ty);
+        sg32_shuf_u32_ptr_ty = get_ptr(spv::StorageClassWorkgroup, u32);
+        sg32_shuf_u32_var = alloc_id();
+        emit_op(types_consts_vars, spv::OpVariable,
+                {ptr_arr, sg32_shuf_u32_var, static_cast<uint32_t>(spv::StorageClassWorkgroup)});
+        interface_vars.push_back(sg32_shuf_u32_var);
+      }
+      *out_elem_ptr_ty = sg32_shuf_u32_ptr_ty;
+      return sg32_shuf_u32_var;
+    }
+  }
 };
 
 struct MergeInfo {
@@ -759,6 +851,7 @@ struct Compiler {
   std::unordered_map<const llvm::GlobalVariable *, uint32_t> wg_gv_map;
   std::unordered_map<const llvm::Argument *, uint32_t> wg_arg_map;
   std::unordered_map<const llvm::AllocaInst *, uint32_t> alloca_map;
+  std::unordered_map<uint32_t, std::pair<PtrKind, uint32_t>> ptr_alloca_roots;
   std::unordered_map<const llvm::GlobalVariable *, FuncConstInfo> fc_map;
   std::unordered_map<BuiltinKind, uint32_t> builtin_vars;
 
@@ -768,8 +861,10 @@ struct Compiler {
 
   std::unordered_map<const llvm::Value *, uint32_t> val_map;
   std::unordered_map<const llvm::Value *, PtrInfo> ptr_map;
+  std::unordered_map<const llvm::Value *, uint32_t> ptr_null_map;
   std::unordered_map<const llvm::PHINode *, uint32_t> phi_ids;
   std::unordered_map<const llvm::PHINode *, PtrInfo> ptr_phi_info;
+  std::unordered_map<const llvm::PHINode *, uint32_t> ptr_phi_null_ids;
   std::unordered_set<const llvm::PHINode *> narrowed_i64_phis;
   std::unordered_set<const llvm::Value *> narrowed_i64_set;
   std::unordered_map<const llvm::Value *, uint32_t> narrowed_i64_vals;
@@ -794,7 +889,7 @@ struct Compiler {
     spv.glsl_ext_id = spv.alloc_id();
     spv.main_fn_id = spv.alloc_id();
 
-    /* LocalSizeId specialization constants: SpecId 1000, 1001, 1002. */
+    /* LocalSizeId specialization constants: SpecId 65536, 65537, 65538 (outside Metal 0..65535 FC range). */
     uint32_t u32 = spv.get_int(32);
     spv.spec_lx = spv.alloc_id();
     spv.spec_ly = spv.alloc_id();
@@ -802,9 +897,9 @@ struct Compiler {
     spv.emit_op(spv.types_consts_vars, spv::OpSpecConstant, {u32, spv.spec_lx, 1u});
     spv.emit_op(spv.types_consts_vars, spv::OpSpecConstant, {u32, spv.spec_ly, 1u});
     spv.emit_op(spv.types_consts_vars, spv::OpSpecConstant, {u32, spv.spec_lz, 1u});
-    spv.decorate(spv.spec_lx, spv::DecorationSpecId, {1000u});
-    spv.decorate(spv.spec_ly, spv::DecorationSpecId, {1001u});
-    spv.decorate(spv.spec_lz, spv::DecorationSpecId, {1002u});
+    spv.decorate(spv.spec_lx, spv::DecorationSpecId, {65536u});
+    spv.decorate(spv.spec_ly, spv::DecorationSpecId, {65537u});
+    spv.decorate(spv.spec_lz, spv::DecorationSpecId, {65538u});
     uint32_t v3u = spv.get_vec(u32, 3);
     spv.wg_size_v3 = spv.alloc_id();
     spv.emit_op(spv.types_consts_vars, spv::OpSpecConstantComposite,
@@ -889,7 +984,12 @@ struct Compiler {
       }
     }
 
-    /* Parse !air.function_constants if present. */
+    /* Parse !air.function_constants if present.
+     * Supports both synthetic key-value form:
+     *   !{ptr @gv, !"air.location_index", i32 N}
+     * and Apple AIR positional form emitted by Apple's Metal compiler:
+     *   !{ptr @gv.MTL_FC_INIT_N_*, !"type_str", !"name_str", i32 N, i1 req}
+     */
     std::unordered_set<uint32_t> used_spec_ids;
     if (auto *fc_nmd = mod.getNamedMetadata("air.function_constants")) {
       for (unsigned i = 0; i < fc_nmd->getNumOperands(); i++) {
@@ -901,6 +1001,7 @@ struct Compiler {
           return spv.fail("duplicate air.function_constants global");
         }
         uint32_t spec_id = UINT32_MAX;
+        bool is_air_bool = false;
         for (unsigned j = 1; j + 1 < node->getNumOperands(); j++) {
           if (auto *s = llvm::dyn_cast_or_null<llvm::MDString>(node->getOperand(j).get())) {
             if (s->getString() == "air.location_index") {
@@ -912,30 +1013,62 @@ struct Compiler {
             }
           }
         }
-        if (spec_id == UINT32_MAX || spec_id > 65535u || (spec_id >= 1000u && spec_id <= 1002u)) {
+        if (spec_id == UINT32_MAX && node->getNumOperands() >= 4) {
+          auto *ty_md = llvm::dyn_cast_or_null<llvm::MDString>(node->getOperand(1).get());
+          auto *nm_md = llvm::dyn_cast_or_null<llvm::MDString>(node->getOperand(2).get());
+          auto *id_c = llvm::mdconst::dyn_extract_or_null<llvm::ConstantInt>(node->getOperand(3).get());
+          if (ty_md && nm_md && id_c && try_get_u32(id_c, spec_id)) {
+            if (ty_md->getString() == "bool") is_air_bool = true;
+          }
+        }
+        if (spec_id == UINT32_MAX || spec_id > 65535u) {
           return spv.fail("invalid air.function_constants location_index");
         }
         if (!used_spec_ids.insert(spec_id).second) {
           return spv.fail("duplicate air.function_constants SpecId");
         }
         llvm::Type *vty = gv->getValueType();
-        uint32_t spv_ty = spv.map_llvm_type(vty);
-        if (!spv_ty) return false;
         uint32_t sid = spv.alloc_id();
-        if (vty->isIntegerTy(1)) {
-          spv.emit_op(spv.types_consts_vars, spv::OpSpecConstantFalse, {spv_ty, sid});
+        if (vty->isIntegerTy(1) || (is_air_bool && vty->isIntegerTy(8))) {
+          uint32_t bty = spv.get_bool();
+          if (!bty) return false;
+          spv.emit_op(spv.types_consts_vars, spv::OpSpecConstantFalse, {bty, sid});
+          is_air_bool = vty->isIntegerTy(8);
         } else if (vty->isIntegerTy() || vty->isFloatTy() || vty->isHalfTy()) {
+          uint32_t spv_ty = spv.map_llvm_type(vty);
+          if (!spv_ty) return false;
           if (vty->isIntegerTy(64)) {
             spv.emit_op(spv.types_consts_vars, spv::OpSpecConstant, {spv_ty, sid, 0u, 0u});
           } else {
             spv.emit_op(spv.types_consts_vars, spv::OpSpecConstant, {spv_ty, sid, 0u});
           }
+          is_air_bool = false;
         } else {
           return spv.fail("unsupported function constant type in AIR");
         }
         spv.decorate(sid, spv::DecorationSpecId, {spec_id});
         if (!spv.error.empty()) return false;
-        fc_map[gv] = FuncConstInfo{spec_id, vty, sid};
+        fc_map[gv] = FuncConstInfo{spec_id, vty, sid, is_air_bool};
+      }
+      /* Map internal constant globals populated from air.fc_initializer in air.static_init ctors. */
+      for (llvm::Function &sf : mod) {
+        if (sf.isDeclaration()) continue;
+        if (sf.getSection() != "air.static_init" && !sf.getName().starts_with("_GLOBAL__sub_I_")) continue;
+        for (llvm::BasicBlock &sbb : sf) {
+          for (llvm::Instruction &si_raw : sbb) {
+            auto *si = llvm::dyn_cast<llvm::StoreInst>(&si_raw);
+            if (!si) continue;
+            auto *dst_gv = llvm::dyn_cast<llvm::GlobalVariable>(si->getPointerOperand()->stripPointerCasts());
+            auto *li = llvm::dyn_cast<llvm::LoadInst>(si->getValueOperand());
+            if (!dst_gv || !li) continue;
+            auto *src_gv = llvm::dyn_cast<llvm::GlobalVariable>(li->getPointerOperand()->stripPointerCasts());
+            if (!src_gv) continue;
+            auto fit = fc_map.find(src_gv);
+            if (fit != fc_map.end() && !fc_map.count(dst_gv)) {
+              fc_map[dst_gv] = fit->second;
+            }
+          }
+        }
       }
     }
     return true;
@@ -1032,13 +1165,21 @@ struct Compiler {
     if (auto *phi = llvm::dyn_cast<llvm::PHINode>(v)) {
       PtrKind found_k = PtrKind::Invalid;
       uint32_t found_b = 0;
+      bool saw_cycle = false;
       for (unsigned i = 0; i < phi->getNumIncomingValues(); i++) {
         llvm::Value *inc = phi->getIncomingValue(i);
-        if (llvm::isa<llvm::UndefValue>(inc) || llvm::isa<llvm::PoisonValue>(inc)) continue;
+        if (llvm::isa<llvm::UndefValue>(inc) || llvm::isa<llvm::PoisonValue>(inc) ||
+            llvm::isa<llvm::ConstantPointerNull>(inc)) {
+          continue;
+        }
         PtrKind k = PtrKind::Invalid;
         uint32_t b = 0;
         TraceRes r = trace_ptr_root_impl(inc, k, b, cache, depth + 1, steps);
         if (r == TraceRes::Failed) return finish(TraceRes::Failed, PtrKind::Invalid, 0);
+        if (r == TraceRes::Cycle) {
+          saw_cycle = true;
+          continue;
+        }
         if (r == TraceRes::Resolved) {
           if (found_k == PtrKind::Invalid) {
             found_k = k;
@@ -1049,28 +1190,60 @@ struct Compiler {
         }
       }
       if (found_k != PtrKind::Invalid) {
+        if (saw_cycle && depth > 0) {
+          cache.erase(v);
+          out_kind = found_k;
+          out_base = found_b;
+          return TraceRes::Resolved;
+        }
         return finish(TraceRes::Resolved, found_k, found_b);
+      }
+      if (saw_cycle) return finish(TraceRes::Cycle, PtrKind::Invalid, 0);
+      return finish(TraceRes::Failed, PtrKind::Invalid, 0);
+    }
+    if (auto *li = llvm::dyn_cast<llvm::LoadInst>(v)) {
+      if (li->getType()->isPointerTy()) {
+        PtrKind pk = PtrKind::Invalid;
+        uint32_t pb = 0;
+        TraceRes r = trace_ptr_root_impl(li->getPointerOperand(), pk, pb, cache, depth + 1, steps);
+        if (r == TraceRes::Resolved && pk == PtrKind::Function) {
+          auto it = ptr_alloca_roots.find(pb);
+          if (it != ptr_alloca_roots.end()) {
+            return finish(TraceRes::Resolved, it->second.first, it->second.second);
+          }
+        }
       }
       return finish(TraceRes::Failed, PtrKind::Invalid, 0);
     }
     if (auto *sel = llvm::dyn_cast<llvm::SelectInst>(v)) {
+      auto is_nullish = [](const llvm::Value *x) {
+        return llvm::isa<llvm::UndefValue>(x) || llvm::isa<llvm::PoisonValue>(x) ||
+               llvm::isa<llvm::ConstantPointerNull>(x);
+      };
+      const llvm::Value *tv = sel->getTrueValue();
+      const llvm::Value *fv = sel->getFalseValue();
+      bool tn = is_nullish(tv);
+      bool fn_null = is_nullish(fv);
+      if (tn && fn_null) return finish(TraceRes::Failed, PtrKind::Invalid, 0);
       PtrKind k1 = PtrKind::Invalid, k2 = PtrKind::Invalid;
       uint32_t b1 = 0, b2 = 0;
-      TraceRes r1 = trace_ptr_root_impl(sel->getTrueValue(), k1, b1, cache, depth + 1, steps);
-      if (r1 == TraceRes::Failed) return finish(TraceRes::Failed, PtrKind::Invalid, 0);
-      TraceRes r2 = trace_ptr_root_impl(sel->getFalseValue(), k2, b2, cache, depth + 1, steps);
-      if (r2 == TraceRes::Failed) return finish(TraceRes::Failed, PtrKind::Invalid, 0);
-      if (r1 == TraceRes::Resolved && r2 == TraceRes::Resolved) {
+      TraceRes r1 = tn ? TraceRes::Cycle : trace_ptr_root_impl(tv, k1, b1, cache, depth + 1, steps);
+      if (!tn && r1 == TraceRes::Failed) return finish(TraceRes::Failed, PtrKind::Invalid, 0);
+      TraceRes r2 = fn_null ? TraceRes::Cycle : trace_ptr_root_impl(fv, k2, b2, cache, depth + 1, steps);
+      if (!fn_null && r2 == TraceRes::Failed) return finish(TraceRes::Failed, PtrKind::Invalid, 0);
+      if (!tn && !fn_null && r1 == TraceRes::Resolved && r2 == TraceRes::Resolved) {
         if (k1 == k2 && b1 == b2) return finish(TraceRes::Resolved, k1, b1);
         return finish(TraceRes::Failed, PtrKind::Invalid, 0);
       }
-      if (r1 == TraceRes::Resolved) {
+      if (!tn && r1 == TraceRes::Resolved) {
+        if (fn_null) return finish(TraceRes::Resolved, k1, b1);
         cache.erase(v);
         out_kind = k1;
         out_base = b1;
         return TraceRes::Resolved;
       }
-      if (r2 == TraceRes::Resolved) {
+      if (!fn_null && r2 == TraceRes::Resolved) {
+        if (tn) return finish(TraceRes::Resolved, k2, b2);
         cache.erase(v);
         out_kind = k2;
         out_base = b2;
@@ -1235,6 +1408,57 @@ struct Compiler {
       }
     }
 
+    /* 3b. Identify single-root pointer allocas (e.g. alloca [N x ptr addrspace(1/3)]). */
+    {
+      std::unordered_map<uint32_t, std::pair<PtrKind, uint32_t>> cand;
+      std::unordered_set<uint32_t> poisoned;
+      bool changed = true;
+      while (changed) {
+        changed = false;
+        TraceCache pt_cache;
+        for (llvm::BasicBlock &bb : fn) {
+          for (llvm::Instruction &inst : bb) {
+            auto *si = llvm::dyn_cast<llvm::StoreInst>(&inst);
+            if (!si || !si->getValueOperand()->getType()->isPointerTy()) continue;
+            PtrKind dst_k = PtrKind::Invalid;
+            uint32_t dst_b = 0;
+            if (!trace_ptr_root(si->getPointerOperand(), dst_k, dst_b, pt_cache)) continue;
+            if (dst_k != PtrKind::Function || poisoned.count(dst_b)) continue;
+            llvm::Value *sv = si->getValueOperand();
+            if (llvm::isa<llvm::ConstantPointerNull>(sv) || llvm::isa<llvm::UndefValue>(sv) ||
+                llvm::isa<llvm::PoisonValue>(sv)) {
+              continue;
+            }
+            PtrKind val_k = PtrKind::Invalid;
+            uint32_t val_b = 0;
+            if (!trace_ptr_root(sv, val_k, val_b, pt_cache)) {
+              poisoned.insert(dst_b);
+              cand.erase(dst_b);
+              ptr_alloca_roots.erase(dst_b);
+              continue;
+            }
+            if (val_k != PtrKind::Buffer && val_k != PtrKind::Workgroup && val_k != PtrKind::Function) {
+              poisoned.insert(dst_b);
+              cand.erase(dst_b);
+              ptr_alloca_roots.erase(dst_b);
+              continue;
+            }
+            auto it = cand.find(dst_b);
+            if (it == cand.end()) {
+              cand[dst_b] = {val_k, val_b};
+              ptr_alloca_roots[dst_b] = {val_k, val_b};
+              changed = true;
+            } else if (it->second.first != val_k || it->second.second != val_b) {
+              poisoned.insert(dst_b);
+              cand.erase(dst_b);
+              ptr_alloca_roots.erase(dst_b);
+              changed = true;
+            }
+          }
+        }
+      }
+    }
+
     /* 4. Pre-scan all memory ops to select optimal race-free backing element types. */
     std::vector<BufferBinding> wg_stats(wg_arrays.size());
     std::vector<BufferBinding> fn_stats(fn_arrays.size());
@@ -1264,6 +1488,7 @@ struct Compiler {
           is_atomic = true;
         }
         if (!ptr || !acc_ty) continue;
+        if (acc_ty->isPointerTy()) acc_ty = llvm::Type::getInt32Ty(mod.getContext());
         PtrKind pk = PtrKind::Invalid;
         uint32_t base = 0;
         if (!trace_ptr_root(ptr, pk, base, trace_cache)) continue;
@@ -1412,11 +1637,46 @@ struct Compiler {
       is_vec3 = true;
       break;
     }
-    case BuiltinKind::LocalInvocationIndex:
+    case BuiltinKind::LocalInvocationIndex: {
+      uint32_t var = get_or_create_builtin_var(bk);
+      if (!var) return 0;
+      raw_id = spv.alloc_id();
+      spv.emit_op(cur_body, spv::OpLoad, {u32, raw_id, var});
+      is_vec3 = false;
+      break;
+    }
     case BuiltinKind::SubgroupLocalInvocationId:
     case BuiltinKind::SubgroupSize:
     case BuiltinKind::SubgroupId:
     case BuiltinKind::NumSubgroups: {
+      if (spv.hw_caps.subgroup_size == 16u) {
+        /* Emulate Apple Silicon 32-lane SIMD groups on 16-lane Vulkan hardware (Mali/V3D). */
+        if (bk == BuiltinKind::SubgroupSize) {
+          raw_id = spv.get_const_u32(32u);
+        } else if (bk == BuiltinKind::NumSubgroups) {
+          uint32_t lx_ly = spv.alloc_id();
+          spv.emit_op(cur_body, spv::OpIMul, {u32, lx_ly, spv.spec_lx, spv.spec_ly});
+          uint32_t total = spv.alloc_id();
+          spv.emit_op(cur_body, spv::OpIMul, {u32, total, lx_ly, spv.spec_lz});
+          uint32_t plus31 = spv.alloc_id();
+          spv.emit_op(cur_body, spv::OpIAdd, {u32, plus31, total, spv.get_const_u32(31u)});
+          raw_id = spv.alloc_id();
+          spv.emit_op(cur_body, spv::OpShiftRightLogical, {u32, raw_id, plus31, spv.get_const_u32(5u)});
+        } else {
+          uint32_t lvar = get_or_create_builtin_var(BuiltinKind::LocalInvocationIndex);
+          if (!lvar) return 0;
+          uint32_t lidx = spv.alloc_id();
+          spv.emit_op(cur_body, spv::OpLoad, {u32, lidx, lvar});
+          raw_id = spv.alloc_id();
+          if (bk == BuiltinKind::SubgroupLocalInvocationId) {
+            spv.emit_op(cur_body, spv::OpBitwiseAnd, {u32, raw_id, lidx, spv.get_const_u32(31u)});
+          } else {
+            spv.emit_op(cur_body, spv::OpShiftRightLogical, {u32, raw_id, lidx, spv.get_const_u32(5u)});
+          }
+        }
+        is_vec3 = false;
+        break;
+      }
       uint32_t var = get_or_create_builtin_var(bk);
       if (!var) return 0;
       raw_id = spv.alloc_id();
@@ -1485,6 +1745,13 @@ struct Compiler {
         if (!inst.getType()->isIntegerTy(64) || inst.use_empty()) continue;
         bool ok = llvm::isa<llvm::ZExtInst>(&inst) || llvm::isa<llvm::SExtInst>(&inst) ||
                   llvm::isa<llvm::PHINode>(&inst) || llvm::isa<llvm::SelectInst>(&inst);
+        if (!spv.hw_caps.has_int64 && llvm::isa<llvm::LoadInst>(&inst)) {
+          auto *li = llvm::cast<llvm::LoadInst>(&inst);
+          if (!llvm::isa<llvm::GlobalVariable>(li->getPointerOperand()) ||
+              !fc_map.count(llvm::cast<llvm::GlobalVariable>(li->getPointerOperand()))) {
+            ok = true;
+          }
+        }
         if (auto *bo = llvm::dyn_cast<llvm::BinaryOperator>(&inst)) {
           switch (bo->getOpcode()) {
           case llvm::Instruction::Add:
@@ -1495,6 +1762,14 @@ struct Compiler {
           case llvm::Instruction::Or:
           case llvm::Instruction::And:
             ok = true;
+            break;
+          case llvm::Instruction::AShr:
+          case llvm::Instruction::UDiv:
+          case llvm::Instruction::SDiv:
+          case llvm::Instruction::URem:
+          case llvm::Instruction::SRem:
+          case llvm::Instruction::Xor:
+            if (!spv.hw_caps.has_int64) ok = true;
             break;
           default: break;
           }
@@ -1539,6 +1814,15 @@ struct Compiler {
               if (u.getOperandNo() != 1) { keep = false; break; }
             } else if (llvm::isa<llvm::InsertElementInst>(usr)) {
               if (u.getOperandNo() != 2) { keep = false; break; }
+            } else if (auto *tr = llvm::dyn_cast<llvm::TruncInst>(usr)) {
+              if (tr->getType()->getIntegerBitWidth() > 32) { keep = false; break; }
+            } else if (auto *ic = llvm::dyn_cast<llvm::ICmpInst>(usr)) {
+              if (spv.hw_caps.has_int64) { keep = false; break; }
+              auto ok_op = [&](const llvm::Value *v) {
+                return narrowed_i64_set.count(v) || llvm::isa<llvm::ConstantInt>(v) ||
+                       llvm::isa<llvm::UndefValue>(v) || llvm::isa<llvm::PoisonValue>(v);
+              };
+              if (!ok_op(ic->getOperand(0)) || !ok_op(ic->getOperand(1))) { keep = false; break; }
             } else if (narrowed_i64_set.count(usr)) {
               continue;
             } else {
@@ -1561,6 +1845,14 @@ struct Compiler {
 
   /* Materialize a single i64 index-only instruction in-place as u32 (O(1), dominance-safe). */
   uint32_t materialize_narrowed_i64(llvm::Instruction *inst) {
+    if (auto *li = llvm::dyn_cast<llvm::LoadInst>(inst)) {
+      PtrInfo ptr = resolve_ptr(li->getPointerOperand());
+      if (ptr.kind == PtrKind::Invalid || ptr.kind == PtrKind::FuncConst) {
+        spv.fail("invalid narrowed i64 load");
+        return 0;
+      }
+      return emit_mem_load_ptr(ptr, llvm::Type::getInt32Ty(mod.getContext()));
+    }
     if (auto *z = llvm::dyn_cast<llvm::ZExtInst>(inst)) {
       return get_index_u32(z->getOperand(0));
     }
@@ -1603,8 +1895,14 @@ struct Compiler {
       case llvm::Instruction::Mul: op = spv::OpIMul; break;
       case llvm::Instruction::Shl: op = spv::OpShiftLeftLogical; break;
       case llvm::Instruction::LShr: op = spv::OpShiftRightLogical; break;
+      case llvm::Instruction::AShr: op = spv::OpShiftRightArithmetic; break;
+      case llvm::Instruction::UDiv: op = spv::OpUDiv; break;
+      case llvm::Instruction::SDiv: op = spv::OpSDiv; break;
+      case llvm::Instruction::URem: op = spv::OpUMod; break;
+      case llvm::Instruction::SRem: op = spv::OpSRem; break;
       case llvm::Instruction::Or: op = spv::OpBitwiseOr; break;
       case llvm::Instruction::And: op = spv::OpBitwiseAnd; break;
+      case llvm::Instruction::Xor: op = spv::OpBitwiseXor; break;
       default: break;
       }
       if (op == spv::OpNop) {
@@ -1916,10 +2214,43 @@ struct Compiler {
       if (cacheable) ptr_map[v] = res;
       return res;
     }
+    if (auto *li = llvm::dyn_cast<llvm::LoadInst>(v)) {
+      if (li->getType()->isPointerTy()) {
+        PtrInfo slot_ptr = resolve_ptr(li->getPointerOperand(), depth + 1);
+        if (slot_ptr.kind == PtrKind::Function) {
+          auto rit = ptr_alloca_roots.find(slot_ptr.base_id);
+          if (rit != ptr_alloca_roots.end()) {
+            uint32_t off = emit_mem_load_ptr(slot_ptr, llvm::Type::getInt32Ty(mod.getContext()));
+            if (!off) return {};
+            PtrInfo res{rit->second.first, rit->second.second, off, 0, 0};
+            if (cacheable) ptr_map[v] = res;
+            return res;
+          }
+        }
+      }
+      spv.fail("unresolvable pointer load in AIR");
+      return {};
+    }
     if (auto *sel = llvm::dyn_cast<llvm::SelectInst>(v)) {
-      PtrInfo t = resolve_ptr(sel->getTrueValue(), depth + 1);
-      PtrInfo f = resolve_ptr(sel->getFalseValue(), depth + 1);
-      if (t.kind == PtrKind::Invalid || t.kind != f.kind || t.base_id != f.base_id) {
+      auto is_nullish = [](const llvm::Value *x) {
+        return llvm::isa<llvm::UndefValue>(x) || llvm::isa<llvm::PoisonValue>(x) ||
+               llvm::isa<llvm::ConstantPointerNull>(x);
+      };
+      bool tn = is_nullish(sel->getTrueValue());
+      bool fn_null = is_nullish(sel->getFalseValue());
+      if (tn && fn_null) {
+        spv.fail("select between null pointers not supported");
+        return {};
+      }
+      PtrInfo t = tn ? PtrInfo{} : resolve_ptr(sel->getTrueValue(), depth + 1);
+      PtrInfo f = fn_null ? PtrInfo{} : resolve_ptr(sel->getFalseValue(), depth + 1);
+      if (tn) {
+        if (f.kind == PtrKind::Invalid) return {};
+        t = PtrInfo{f.kind, f.base_id, spv.get_const_u32(0), 0, 0};
+      } else if (fn_null) {
+        if (t.kind == PtrKind::Invalid) return {};
+        f = PtrInfo{t.kind, t.base_id, spv.get_const_u32(0), 0, 0};
+      } else if (t.kind == PtrKind::Invalid || t.kind != f.kind || t.base_id != f.base_id) {
         spv.fail("select between pointers to different buffers not supported");
         return {};
       }
@@ -1930,11 +2261,53 @@ struct Compiler {
       uint32_t off = spv.alloc_id();
       spv.emit_op(cur_body, spv::OpSelect, {spv.get_int(32), off, cond, toff, foff});
       PtrInfo res{t.kind, t.base_id, off, 0, 0};
-      if (cacheable) ptr_map[v] = res;
+      if (cacheable) {
+        ptr_map[v] = res;
+        uint32_t tnull = get_ptr_is_null(sel->getTrueValue());
+        uint32_t fnull = get_ptr_is_null(sel->getFalseValue());
+        if (tnull != spv.get_const_bool(false) || fnull != spv.get_const_bool(false)) {
+          uint32_t nid = spv.alloc_id();
+          spv.emit_op(cur_body, spv::OpSelect, {spv.get_bool(), nid, cond, tnull, fnull});
+          ptr_null_map[v] = nid;
+        }
+      }
       return res;
     }
     spv.fail("unresolvable pointer expression in AIR");
     return {};
+  }
+
+  uint32_t get_ptr_is_null(llvm::Value *v, int depth = 0) {
+    if (!v || depth > kMaxPtrDepth) return spv.get_const_bool(false);
+    if (llvm::isa<llvm::ConstantPointerNull>(v)) return spv.get_const_bool(true);
+    if (llvm::isa<llvm::UndefValue>(v) || llvm::isa<llvm::PoisonValue>(v)) {
+      return spv.get_undef(spv.get_bool());
+    }
+    if (auto it = ptr_null_map.find(v); it != ptr_null_map.end()) return it->second;
+    if (auto *bc = llvm::dyn_cast<llvm::BitCastOperator>(v)) {
+      return get_ptr_is_null(bc->getOperand(0), depth + 1);
+    }
+    if (auto *asc = llvm::dyn_cast<llvm::AddrSpaceCastOperator>(v)) {
+      return get_ptr_is_null(asc->getOperand(0), depth + 1);
+    }
+    if (auto *gep = llvm::dyn_cast<llvm::GEPOperator>(v)) {
+      return get_ptr_is_null(gep->getPointerOperand(), depth + 1);
+    }
+    if (auto *fi = llvm::dyn_cast<llvm::FreezeInst>(v)) {
+      return get_ptr_is_null(fi->getOperand(0), depth + 1);
+    }
+    return spv.get_const_bool(false);
+  }
+
+  uint32_t emit_pc_load(uint32_t field, uint32_t slot) {
+    uint32_t pc_var = spv.get_ptr_pc_var();
+    uint32_t ptr_id = spv.alloc_id();
+    spv.emit_op(cur_body, spv::OpAccessChain,
+                {spv.pc_ptr_u32_ty, ptr_id, pc_var, spv.get_const_u32(field),
+                 spv.get_const_u32(slot)});
+    uint32_t val_id = spv.alloc_id();
+    spv.emit_op(cur_body, spv::OpLoad, {spv.get_int(32), val_id, ptr_id});
+    return val_id;
   }
 
   bool get_backing_info(const PtrInfo &ptr, uint32_t &var_id, uint32_t &ptr_elem_ty, ElemKind &elem,
@@ -2633,6 +3006,91 @@ struct Compiler {
       return spv.error.empty();
     }
 
+    if (name.starts_with("llvm.memset.")) {
+      if (ci->arg_size() < 3) return spv.fail("malformed llvm.memset");
+      PtrInfo dst = resolve_ptr(ci->getArgOperand(0));
+      if (dst.kind == PtrKind::Invalid || dst.kind == PtrKind::FuncConst) {
+        return spv.fail("invalid llvm.memset destination");
+      }
+      if (dst.kind == PtrKind::Buffer &&
+          (dst.base_id >= kMaxBufferSlots || buffers[dst.base_id].readonly)) {
+        return spv.fail("llvm.memset to readonly buffer");
+      }
+      auto *len_c = llvm::dyn_cast<llvm::ConstantInt>(ci->getArgOperand(2));
+      uint64_t nbytes = 0;
+      if (!len_c || !try_get_u64(len_c, nbytes) || nbytes > 1024u) {
+        return spv.fail("llvm.memset requires constant size <= 1024");
+      }
+      uint32_t base_off = materialize_byte_off(dst);
+      llvm::Type *i32_ty = llvm::Type::getInt32Ty(mod.getContext());
+      llvm::Type *i8_ty = llvm::Type::getInt8Ty(mod.getContext());
+      uint64_t off = 0;
+      if (auto *vc = llvm::dyn_cast<llvm::ConstantInt>(ci->getArgOperand(1))) {
+        uint32_t b = static_cast<uint32_t>(vc->getZExtValue() & 0xFFu);
+        uint32_t w32 = b * 0x01010101u;
+        uint32_t c32 = spv.get_const_u32(w32);
+        while (off + 4u <= nbytes) {
+          PtrInfo p{dst.kind, dst.base_id,
+                    off == 0 ? base_off : emit_u32_add(base_off, spv.get_const_u32(static_cast<uint32_t>(off))),
+                    0, 0};
+          if (!emit_mem_store_ptr(p, i32_ty, c32)) return false;
+          off += 4u;
+        }
+      }
+      if (off < nbytes) {
+        uint32_t vb = get_val(ci->getArgOperand(1));
+        if (!vb) return false;
+        while (off < nbytes) {
+          PtrInfo p{dst.kind, dst.base_id,
+                    off == 0 ? base_off : emit_u32_add(base_off, spv.get_const_u32(static_cast<uint32_t>(off))),
+                    0, 0};
+          if (!emit_mem_store_ptr(p, i8_ty, vb)) return false;
+          off += 1u;
+        }
+      }
+      return spv.error.empty();
+    }
+    if (name.starts_with("llvm.memcpy.") || name.starts_with("llvm.memmove.")) {
+      if (ci->arg_size() < 3) return spv.fail("malformed llvm.memcpy");
+      PtrInfo dst = resolve_ptr(ci->getArgOperand(0));
+      PtrInfo src = resolve_ptr(ci->getArgOperand(1));
+      if (dst.kind == PtrKind::Invalid || dst.kind == PtrKind::FuncConst ||
+          src.kind == PtrKind::Invalid || src.kind == PtrKind::FuncConst) {
+        return spv.fail("invalid llvm.memcpy pointer");
+      }
+      if (dst.kind == PtrKind::Buffer &&
+          (dst.base_id >= kMaxBufferSlots || buffers[dst.base_id].readonly)) {
+        return spv.fail("llvm.memcpy to readonly buffer");
+      }
+      auto *len_c = llvm::dyn_cast<llvm::ConstantInt>(ci->getArgOperand(2));
+      uint64_t nbytes = 0;
+      if (!len_c || !try_get_u64(len_c, nbytes) || nbytes > 1024u) {
+        return spv.fail("llvm.memcpy requires constant size <= 1024");
+      }
+      uint32_t dst_off = materialize_byte_off(dst);
+      uint32_t src_off = materialize_byte_off(src);
+      llvm::Type *i32_ty = llvm::Type::getInt32Ty(mod.getContext());
+      llvm::Type *i8_ty = llvm::Type::getInt8Ty(mod.getContext());
+      uint64_t off = 0;
+      while (off + 4u <= nbytes) {
+        uint32_t so = off == 0 ? src_off : emit_u32_add(src_off, spv.get_const_u32(static_cast<uint32_t>(off)));
+        uint32_t doff = off == 0 ? dst_off : emit_u32_add(dst_off, spv.get_const_u32(static_cast<uint32_t>(off)));
+        uint32_t v = emit_mem_load_ptr(PtrInfo{src.kind, src.base_id, so, 0, 0}, i32_ty);
+        if (!v) return false;
+        if (!emit_mem_store_ptr(PtrInfo{dst.kind, dst.base_id, doff, 0, 0}, i32_ty, v)) return false;
+        off += 4u;
+      }
+      while (off < nbytes) {
+        uint32_t so = off == 0 ? src_off : emit_u32_add(src_off, spv.get_const_u32(static_cast<uint32_t>(off)));
+        uint32_t doff = off == 0 ? dst_off : emit_u32_add(dst_off, spv.get_const_u32(static_cast<uint32_t>(off)));
+        uint32_t v = emit_mem_load_ptr(PtrInfo{src.kind, src.base_id, so, 0, 0}, i8_ty);
+        if (!v) return false;
+        if (!emit_mem_store_ptr(PtrInfo{dst.kind, dst.base_id, doff, 0, 0}, i8_ty, v)) return false;
+        off += 1u;
+      }
+      return spv.error.empty();
+    }
+
     llvm::Type *rty = ci->getType();
     if (rty->isVoidTy()) {
       return spv.fail("unsupported void AIR/LLVM intrinsic call: " + name.str());
@@ -2733,6 +3191,7 @@ struct Compiler {
       return unary_glsl(GLSLstd450RoundEven, true);
     }
     if (stem == "fract" || stem.starts_with("fract.")) return unary_glsl(GLSLstd450Fract, true);
+    if (stem == "sign" || stem.starts_with("sign.")) return unary_glsl(GLSLstd450FSign, true);
     if (stem == "fmin" || stem.starts_with("fmin.") || stem == "minnum" || stem.starts_with("minnum.") ||
         stem == "minimum" || stem.starts_with("minimum.")) {
       return binary_glsl(GLSLstd450FMin, true);
@@ -2741,10 +3200,18 @@ struct Compiler {
         stem == "maximum" || stem.starts_with("maximum.")) {
       return binary_glsl(GLSLstd450FMax, true);
     }
-    if (stem == "smin" || stem.starts_with("smin.")) return binary_glsl(GLSLstd450SMin, false);
-    if (stem == "umin" || stem.starts_with("umin.")) return binary_glsl(GLSLstd450UMin, false);
-    if (stem == "smax" || stem.starts_with("smax.")) return binary_glsl(GLSLstd450SMax, false);
-    if (stem == "umax" || stem.starts_with("umax.")) return binary_glsl(GLSLstd450UMax, false);
+    if (stem == "smin" || stem.starts_with("smin.") || stem == "min.s" || stem.starts_with("min.s.")) {
+      return binary_glsl(GLSLstd450SMin, false);
+    }
+    if (stem == "umin" || stem.starts_with("umin.") || stem == "min.u" || stem.starts_with("min.u.")) {
+      return binary_glsl(GLSLstd450UMin, false);
+    }
+    if (stem == "smax" || stem.starts_with("smax.") || stem == "max.s" || stem.starts_with("max.s.")) {
+      return binary_glsl(GLSLstd450SMax, false);
+    }
+    if (stem == "umax" || stem.starts_with("umax.") || stem == "max.u" || stem.starts_with("max.u.")) {
+      return binary_glsl(GLSLstd450UMax, false);
+    }
     if (stem == "fclamp" || stem.starts_with("fclamp.") ||
         (stem.starts_with("clamp") && rty->isFPOrFPVectorTy())) {
       return ternary_glsl(GLSLstd450FClamp, true);
@@ -2812,6 +3279,73 @@ struct Compiler {
       spv.emit_op(cur_body, rty->isFPOrFPVectorTy() ? fp_op : int_op,
                   {spv_rty, id, spv.get_const_u32(static_cast<uint32_t>(spv::ScopeSubgroup)),
                    static_cast<uint32_t>(gop), a});
+      if (spv.hw_caps.subgroup_size == 16u && gop == spv::GroupOperationReduce &&
+          (rty->isFloatTy() || rty->isIntegerTy(32))) {
+        /* Pair adjacent 16-lane hardware subgroups via 256B workgroup scratch to form 32-lane reductions. */
+        bool is_fp = rty->isFloatTy();
+        uint32_t u32 = spv.get_int(32);
+        uint32_t bty = spv.get_bool();
+        uint32_t sg_var = get_or_create_builtin_var(BuiltinKind::SubgroupId);
+        uint32_t nsg_var = get_or_create_builtin_var(BuiltinKind::NumSubgroups);
+        if (!sg_var || !nsg_var) return false;
+        uint32_t hw_sg = spv.alloc_id();
+        spv.emit_op(cur_body, spv::OpLoad, {u32, hw_sg, sg_var});
+        uint32_t hw_nsg = spv.alloc_id();
+        spv.emit_op(cur_body, spv::OpLoad, {u32, hw_nsg, nsg_var});
+        uint32_t sg_idx = spv.alloc_id();
+        spv.emit_op(cur_body, spv::OpBitwiseAnd, {u32, sg_idx, hw_sg, spv.get_const_u32(63u)});
+        uint32_t partner = spv.alloc_id();
+        spv.emit_op(cur_body, spv::OpBitwiseXor, {u32, partner, hw_sg, spv.get_const_u32(1u)});
+        uint32_t has_partner = spv.alloc_id();
+        spv.emit_op(cur_body, spv::OpULessThan, {bty, has_partner, partner, hw_nsg});
+        uint32_t partner_idx = spv.alloc_id();
+        spv.emit_op(cur_body, spv::OpBitwiseAnd, {u32, partner_idx, partner, spv.get_const_u32(63u)});
+        uint32_t safe_partner = spv.alloc_id();
+        spv.emit_op(cur_body, spv::OpSelect, {u32, safe_partner, has_partner, partner_idx, sg_idx});
+
+        uint32_t ptr_ty = 0;
+        uint32_t scratch_var = spv.get_sg32_scratch(is_fp, &ptr_ty);
+        uint32_t st_ptr = spv.alloc_id();
+        spv.emit_op(cur_body, spv::OpAccessChain, {ptr_ty, st_ptr, scratch_var, sg_idx});
+        spv.emit_op(cur_body, spv::OpStore, {st_ptr, id});
+        uint32_t sem = static_cast<uint32_t>(spv::MemorySemanticsAcquireReleaseMask) |
+                       static_cast<uint32_t>(spv::MemorySemanticsWorkgroupMemoryMask);
+        spv.emit_op(cur_body, spv::OpControlBarrier,
+                    {spv.get_const_u32(static_cast<uint32_t>(spv::ScopeWorkgroup)),
+                     spv.get_const_u32(static_cast<uint32_t>(spv::ScopeWorkgroup)),
+                     spv.get_const_u32(sem)});
+        uint32_t ld_ptr = spv.alloc_id();
+        spv.emit_op(cur_body, spv::OpAccessChain, {ptr_ty, ld_ptr, scratch_var, safe_partner});
+        uint32_t pval = spv.alloc_id();
+        spv.emit_op(cur_body, spv::OpLoad, {spv_rty, pval, ld_ptr});
+        uint32_t comb = 0;
+        if (is_fp) {
+          if (fp_op == spv::OpGroupNonUniformFAdd) {
+            comb = spv.alloc_id();
+            spv.emit_op(cur_body, spv::OpFAdd, {spv_rty, comb, id, pval});
+          } else if (fp_op == spv::OpGroupNonUniformFMax) {
+            comb = emit_glsl_ext(spv_rty, GLSLstd450FMax, {id, pval});
+          } else {
+            comb = emit_glsl_ext(spv_rty, GLSLstd450FMin, {id, pval});
+          }
+        } else {
+          if (int_op == spv::OpGroupNonUniformIAdd) {
+            comb = spv.alloc_id();
+            spv.emit_op(cur_body, spv::OpIAdd, {spv_rty, comb, id, pval});
+          } else if (int_op == spv::OpGroupNonUniformSMax) {
+            comb = emit_glsl_ext(spv_rty, GLSLstd450SMax, {id, pval});
+          } else {
+            comb = emit_glsl_ext(spv_rty, GLSLstd450SMin, {id, pval});
+          }
+        }
+        uint32_t res = spv.alloc_id();
+        spv.emit_op(cur_body, spv::OpSelect, {spv_rty, res, has_partner, comb, id});
+        spv.emit_op(cur_body, spv::OpControlBarrier,
+                    {spv.get_const_u32(static_cast<uint32_t>(spv::ScopeWorkgroup)),
+                     spv.get_const_u32(static_cast<uint32_t>(spv::ScopeWorkgroup)),
+                     spv.get_const_u32(sem)});
+        id = res;
+      }
       val_map[ci] = id;
       return spv.error.empty();
     };
@@ -2830,12 +3364,93 @@ struct Compiler {
     if (match_math("air.simd_min"))
       return emit_subgroup_arith(spv::OpGroupNonUniformFMin, spv::OpGroupNonUniformSMin,
                                  spv::GroupOperationReduce);
+    auto emit_sg32_shuffle_emu = [&](uint32_t val, uint32_t arg, int mode) -> bool {
+      /* mode: 0=down, 1=up, 2=xor, 3=index/broadcast */
+      bool is_fp = rty->isFloatTy();
+      uint32_t u32 = spv.get_int(32);
+      uint32_t bty = spv.get_bool();
+      uint32_t lvar = get_or_create_builtin_var(BuiltinKind::LocalInvocationIndex);
+      if (!lvar) return false;
+      uint32_t raw_lid = spv.alloc_id();
+      spv.emit_op(cur_body, spv::OpLoad, {u32, raw_lid, lvar});
+      uint32_t lid = spv.alloc_id();
+      spv.emit_op(cur_body, spv::OpBitwiseAnd, {u32, lid, raw_lid, spv.get_const_u32(1023u)});
+      uint32_t lane = spv.alloc_id();
+      spv.emit_op(cur_body, spv::OpBitwiseAnd, {u32, lane, lid, spv.get_const_u32(31u)});
+      uint32_t base = spv.alloc_id();
+      spv.emit_op(cur_body, spv::OpBitwiseAnd, {u32, base, lid, spv.get_const_u32(~31u & 1023u)});
+
+      uint32_t ptr_ty = 0;
+      uint32_t scratch = spv.get_sg32_shuf_scratch(is_fp, &ptr_ty);
+      uint32_t st_ptr = spv.alloc_id();
+      spv.emit_op(cur_body, spv::OpAccessChain, {ptr_ty, st_ptr, scratch, lid});
+      spv.emit_op(cur_body, spv::OpStore, {st_ptr, val});
+      uint32_t sem = static_cast<uint32_t>(spv::MemorySemanticsAcquireReleaseMask) |
+                     static_cast<uint32_t>(spv::MemorySemanticsWorkgroupMemoryMask);
+      spv.emit_op(cur_body, spv::OpControlBarrier,
+                  {spv.get_const_u32(static_cast<uint32_t>(spv::ScopeWorkgroup)),
+                   spv.get_const_u32(static_cast<uint32_t>(spv::ScopeWorkgroup)),
+                   spv.get_const_u32(sem)});
+
+      uint32_t target_idx = lid;
+      if (mode == 0) {
+        uint32_t tlane = spv.alloc_id();
+        spv.emit_op(cur_body, spv::OpIAdd, {u32, tlane, lane, arg});
+        uint32_t ok = spv.alloc_id();
+        spv.emit_op(cur_body, spv::OpULessThan, {bty, ok, tlane, spv.get_const_u32(32u)});
+        uint32_t cand = spv.alloc_id();
+        spv.emit_op(cur_body, spv::OpIAdd, {u32, cand, base, tlane});
+        target_idx = spv.alloc_id();
+        spv.emit_op(cur_body, spv::OpSelect, {u32, target_idx, ok, cand, lid});
+      } else if (mode == 1) {
+        uint32_t ok = spv.alloc_id();
+        spv.emit_op(cur_body, spv::OpUGreaterThanEqual, {bty, ok, lane, arg});
+        uint32_t tlane = spv.alloc_id();
+        spv.emit_op(cur_body, spv::OpISub, {u32, tlane, lane, arg});
+        uint32_t cand = spv.alloc_id();
+        spv.emit_op(cur_body, spv::OpIAdd, {u32, cand, base, tlane});
+        target_idx = spv.alloc_id();
+        spv.emit_op(cur_body, spv::OpSelect, {u32, target_idx, ok, cand, lid});
+      } else if (mode == 2) {
+        uint32_t x = spv.alloc_id();
+        spv.emit_op(cur_body, spv::OpBitwiseXor, {u32, x, lane, arg});
+        uint32_t tlane = spv.alloc_id();
+        spv.emit_op(cur_body, spv::OpBitwiseAnd, {u32, tlane, x, spv.get_const_u32(31u)});
+        target_idx = spv.alloc_id();
+        spv.emit_op(cur_body, spv::OpIAdd, {u32, target_idx, base, tlane});
+      } else {
+        uint32_t tlane = spv.alloc_id();
+        spv.emit_op(cur_body, spv::OpBitwiseAnd, {u32, tlane, arg, spv.get_const_u32(31u)});
+        target_idx = spv.alloc_id();
+        spv.emit_op(cur_body, spv::OpIAdd, {u32, target_idx, base, tlane});
+      }
+      uint32_t ld_ptr = spv.alloc_id();
+      spv.emit_op(cur_body, spv::OpAccessChain, {ptr_ty, ld_ptr, scratch, target_idx});
+      uint32_t res = spv.alloc_id();
+      spv.emit_op(cur_body, spv::OpLoad, {spv_rty, res, ld_ptr});
+      spv.emit_op(cur_body, spv::OpControlBarrier,
+                  {spv.get_const_u32(static_cast<uint32_t>(spv::ScopeWorkgroup)),
+                   spv.get_const_u32(static_cast<uint32_t>(spv::ScopeWorkgroup)),
+                   spv.get_const_u32(sem)});
+      val_map[ci] = res;
+      return spv.error.empty();
+    };
     if (match_math("air.simd_shuffle_down") || match_math("air.simd_shuffle_up") ||
         match_math("air.simd_shuffle_xor") || match_math("air.simd_shuffle")) {
       if (ci->arg_size() < 2) return spv.fail("missing subgroup shuffle args");
       if ((!rty->isFPOrFPVectorTy() && !rty->isIntOrIntVectorTy()) ||
           ci->getArgOperand(0)->getType() != rty) {
         return spv.fail("subgroup shuffle operand type mismatch");
+      }
+      uint32_t val = get_val(ci->getArgOperand(0));
+      uint32_t delta = get_index_u32(ci->getArgOperand(1));
+      if (!val || !delta) return false;
+      if (spv.hw_caps.subgroup_size == 16u && (rty->isFloatTy() || rty->isIntegerTy(32))) {
+        int mode = 3;
+        if (match_math("air.simd_shuffle_down")) mode = 0;
+        else if (match_math("air.simd_shuffle_up")) mode = 1;
+        else if (match_math("air.simd_shuffle_xor")) mode = 2;
+        return emit_sg32_shuffle_emu(val, delta, mode);
       }
       bool is_rel = match_math("air.simd_shuffle_down") || match_math("air.simd_shuffle_up");
       uint32_t req_ops = AIR2SPV_SUBGROUP_BASIC |
@@ -2846,9 +3461,6 @@ struct Compiler {
       spv.caps.insert(spv::CapabilityGroupNonUniform);
       spv.caps.insert(is_rel ? spv::CapabilityGroupNonUniformShuffleRelative
                              : spv::CapabilityGroupNonUniformShuffle);
-      uint32_t val = get_val(ci->getArgOperand(0));
-      uint32_t delta = get_index_u32(ci->getArgOperand(1));
-      if (!val || !delta) return false;
       spv::Op op = spv::OpGroupNonUniformShuffle;
       if (match_math("air.simd_shuffle_down")) op = spv::OpGroupNonUniformShuffleDown;
       else if (match_math("air.simd_shuffle_up")) op = spv::OpGroupNonUniformShuffleUp;
@@ -2866,15 +3478,18 @@ struct Compiler {
           ci->getArgOperand(0)->getType() != rty) {
         return spv.fail("subgroup broadcast operand type mismatch");
       }
+      uint32_t val = get_val(ci->getArgOperand(0));
+      uint32_t lane = get_index_u32(ci->getArgOperand(1));
+      if (!val || !lane) return false;
+      if (spv.hw_caps.subgroup_size == 16u && (rty->isFloatTy() || rty->isIntegerTy(32))) {
+        return emit_sg32_shuffle_emu(val, lane, 3);
+      }
       uint32_t req_ops = AIR2SPV_SUBGROUP_BASIC | AIR2SPV_SUBGROUP_BALLOT;
       if ((spv.hw_caps.subgroup_ops & req_ops) != req_ops) {
         return spv.fail("subgroup broadcast capability unsupported by GPU");
       }
       spv.caps.insert(spv::CapabilityGroupNonUniform);
       spv.caps.insert(spv::CapabilityGroupNonUniformBallot);
-      uint32_t val = get_val(ci->getArgOperand(0));
-      uint32_t lane = get_index_u32(ci->getArgOperand(1));
-      if (!val || !lane) return false;
       uint32_t id = spv.alloc_id();
       spv.emit_op(cur_body, spv::OpGroupNonUniformBroadcast,
                   {spv_rty, id, spv.get_const_u32(static_cast<uint32_t>(spv::ScopeSubgroup)),
@@ -2888,7 +3503,8 @@ struct Compiler {
       if (ci->arg_size() < 1) return spv.fail("missing air.convert arg");
       llvm::Value *src_v = ci->getArgOperand(0);
       llvm::Type *sty = src_v->getType();
-      bool src_ok = sty->isFPOrFPVectorTy() || is_nonbool_int(sty);
+      bool src_is_bool = sty->getScalarType()->isIntegerTy(1);
+      bool src_ok = sty->isFPOrFPVectorTy() || is_nonbool_int(sty) || src_is_bool;
       bool dst_ok = rty->isFPOrFPVectorTy() || is_nonbool_int(rty);
       if (!src_ok || !dst_ok || vec_lanes(sty) != vec_lanes(rty)) {
         return spv.fail("unsupported air.convert operand or result type");
@@ -2898,6 +3514,46 @@ struct Compiler {
       if (sty == rty) {
         val_map[ci] = src_id;
         return true;
+      }
+      if (src_is_bool) {
+        bool is_signed = name.contains(".s.");
+        llvm::Type *r_scalar = rty->getScalarType();
+        uint32_t c_zero = 0, c_one = 0;
+        if (r_scalar->isFloatTy()) {
+          c_zero = spv.get_const_f32(0.0f);
+          c_one = spv.get_const_f32(is_signed ? -1.0f : 1.0f);
+        } else if (r_scalar->isHalfTy()) {
+          c_zero = spv.get_const_fp_bits(16, 0x0000u);
+          c_one = spv.get_const_fp_bits(16, is_signed ? 0xBC00u : 0x3C00u);
+        } else if (auto *it = llvm::dyn_cast<llvm::IntegerType>(r_scalar)) {
+          uint32_t bw = it->getBitWidth();
+          c_zero = spv.get_const_int(bw, 0);
+          c_one = spv.get_const_int(bw, is_signed ? ~0ULL : 1ULL);
+        } else {
+          return spv.fail("unsupported air.convert bool destination type");
+        }
+        if (!c_zero || !c_one) return false;
+        uint32_t lanes = vec_lanes(rty);
+        if (lanes > 1) {
+          std::vector<uint32_t> z_ops = {spv_rty, 0};
+          std::vector<uint32_t> o_ops = {spv_rty, 0};
+          uint32_t vz = spv.alloc_id();
+          uint32_t vo = spv.alloc_id();
+          z_ops[1] = vz;
+          o_ops[1] = vo;
+          for (uint32_t l = 0; l < lanes; l++) {
+            z_ops.push_back(c_zero);
+            o_ops.push_back(c_one);
+          }
+          spv.emit_op_vec(spv.types_consts_vars, spv::OpConstantComposite, z_ops);
+          spv.emit_op_vec(spv.types_consts_vars, spv::OpConstantComposite, o_ops);
+          c_zero = vz;
+          c_one = vo;
+        }
+        uint32_t id = spv.alloc_id();
+        spv.emit_op(cur_body, spv::OpSelect, {spv_rty, id, src_id, c_one, c_zero});
+        val_map[ci] = id;
+        return spv.error.empty();
       }
       uint32_t id = spv.alloc_id();
       spv::Op op = spv::OpNop;
@@ -2944,6 +3600,16 @@ struct Compiler {
         if (auto *gv = llvm::dyn_cast<llvm::GlobalVariable>(li->getPointerOperand())) {
           auto it = fc_map.find(gv);
           if (it != fc_map.end()) {
+            if (it->second.is_air_bool && li->getType()->isIntegerTy(8)) {
+              uint32_t u8 = spv.get_int(8);
+              uint32_t c1 = spv.get_const_int(8, 1);
+              uint32_t c0 = spv.get_const_int(8, 0);
+              if (!u8 || !c1 || !c0) return false;
+              uint32_t sel = spv.alloc_id();
+              spv.emit_op(cur_body, spv::OpSelect, {u8, sel, it->second.spv_id, c1, c0});
+              val_map[li] = sel;
+              return spv.error.empty();
+            }
             val_map[li] = it->second.spv_id;
             return true;
           }
@@ -2964,6 +3630,41 @@ struct Compiler {
       if (ptr.kind == PtrKind::Buffer &&
           (ptr.base_id >= kMaxBufferSlots || buffers[ptr.base_id].readonly)) {
         return spv.fail("store to readonly buffer binding");
+      }
+      if (si->getValueOperand()->getType()->isPointerTy()) {
+        if (ptr.kind != PtrKind::Function || !ptr_alloca_roots.count(ptr.base_id)) {
+          return spv.fail("pointer store only supported to single-root function alloca");
+        }
+        llvm::Value *sv = si->getValueOperand();
+        uint32_t off = 0;
+        if (llvm::isa<llvm::ConstantPointerNull>(sv) || llvm::isa<llvm::UndefValue>(sv) ||
+            llvm::isa<llvm::PoisonValue>(sv)) {
+          off = spv.get_const_u32(0);
+        } else {
+          PtrInfo vp = resolve_ptr(sv);
+          if (vp.kind == PtrKind::Invalid) return false;
+          auto root = ptr_alloca_roots[ptr.base_id];
+          if (vp.kind != root.first || vp.base_id != root.second) {
+            return spv.fail("pointer store root mismatch in function alloca");
+          }
+          off = materialize_byte_off(vp);
+        }
+        return emit_mem_store_ptr(ptr, llvm::Type::getInt32Ty(mod.getContext()), off);
+      }
+      if (!spv.hw_caps.has_int64 && si->getValueOperand()->getType()->isIntegerTy(64)) {
+        if (auto *ci = llvm::dyn_cast<llvm::ConstantInt>(si->getValueOperand())) {
+          uint64_t val = ci->getZExtValue();
+          llvm::Type *u32_ty = llvm::Type::getInt32Ty(mod.getContext());
+          if (!emit_mem_store_ptr(ptr, u32_ty, spv.get_const_u32(static_cast<uint32_t>(val)))) {
+            return false;
+          }
+          PtrInfo hi = ptr;
+          hi.byte_off_id = emit_u32_add(materialize_byte_off(ptr), spv.get_const_u32(4u));
+          hi.idx_id = 0;
+          hi.idx_scale = 0;
+          return emit_mem_store_ptr(hi, u32_ty,
+                                    spv.get_const_u32(static_cast<uint32_t>(val >> 32)));
+        }
       }
       uint32_t v = get_val(si->getValueOperand());
       if (!v) return false;
@@ -3073,10 +3774,86 @@ struct Compiler {
     }
 
     if (auto *ic = llvm::dyn_cast<llvm::ICmpInst>(&inst)) {
-      uint32_t a = get_val(ic->getOperand(0));
-      uint32_t b = get_val(ic->getOperand(1));
-      if (!a || !b) return false;
       llvm::Type *op_ty = ic->getOperand(0)->getType();
+      if (op_ty->isPointerTy()) {
+        auto pred = ic->getPredicate();
+        if (pred != llvm::ICmpInst::ICMP_EQ && pred != llvm::ICmpInst::ICMP_NE) {
+          return spv.fail("unsupported pointer icmp predicate");
+        }
+        llvm::Value *op0 = ic->getOperand(0);
+        llvm::Value *op1 = ic->getOperand(1);
+        uint32_t bty = spv.get_bool();
+        uint32_t eq_id = 0;
+        bool n0 = llvm::isa<llvm::ConstantPointerNull>(op0);
+        bool n1 = llvm::isa<llvm::ConstantPointerNull>(op1);
+        if (n0 && n1) {
+          eq_id = spv.get_const_bool(true);
+        } else if (n0) {
+          eq_id = get_ptr_is_null(op1);
+        } else if (n1) {
+          eq_id = get_ptr_is_null(op0);
+        } else {
+          PtrInfo pa = resolve_ptr(op0);
+          PtrInfo pb = resolve_ptr(op1);
+          if (pa.kind == PtrKind::Invalid || pb.kind == PtrKind::Invalid) return false;
+          uint32_t same_addr = 0;
+          if (pa.kind == pb.kind && pa.base_id == pb.base_id) {
+            uint32_t oa = materialize_byte_off(pa);
+            uint32_t ob = materialize_byte_off(pb);
+            same_addr = spv.alloc_id();
+            spv.emit_op(cur_body, spv::OpIEqual, {bty, same_addr, oa, ob});
+          } else if (pa.kind == PtrKind::Buffer && pb.kind == PtrKind::Buffer &&
+                     pa.base_id < 16u && pb.base_id < 16u) {
+            uint32_t ida = emit_pc_load(0u, pa.base_id);
+            uint32_t idb = emit_pc_load(0u, pb.base_id);
+            uint32_t same_id = spv.alloc_id();
+            spv.emit_op(cur_body, spv::OpIEqual, {bty, same_id, ida, idb});
+            uint32_t off_a = emit_u32_add(emit_pc_load(1u, pa.base_id), materialize_byte_off(pa));
+            uint32_t off_b = emit_u32_add(emit_pc_load(1u, pb.base_id), materialize_byte_off(pb));
+            uint32_t same_off = spv.alloc_id();
+            spv.emit_op(cur_body, spv::OpIEqual, {bty, same_off, off_a, off_b});
+            same_addr = spv.alloc_id();
+            spv.emit_op(cur_body, spv::OpLogicalAnd, {bty, same_addr, same_id, same_off});
+          } else {
+            same_addr = spv.get_const_bool(false);
+          }
+          uint32_t na = get_ptr_is_null(op0);
+          uint32_t nb = get_ptr_is_null(op1);
+          uint32_t cf = spv.get_const_bool(false);
+          if (na == cf && nb == cf) {
+            eq_id = same_addr;
+          } else {
+            uint32_t both_null = spv.alloc_id();
+            spv.emit_op(cur_body, spv::OpLogicalAnd, {bty, both_null, na, nb});
+            uint32_t any_null = spv.alloc_id();
+            spv.emit_op(cur_body, spv::OpLogicalOr, {bty, any_null, na, nb});
+            uint32_t neither_null = spv.alloc_id();
+            spv.emit_op(cur_body, spv::OpLogicalNot, {bty, neither_null, any_null});
+            uint32_t nonnull_eq = spv.alloc_id();
+            spv.emit_op(cur_body, spv::OpLogicalAnd, {bty, nonnull_eq, neither_null, same_addr});
+            eq_id = spv.alloc_id();
+            spv.emit_op(cur_body, spv::OpLogicalOr, {bty, eq_id, both_null, nonnull_eq});
+          }
+        }
+        if (pred == llvm::ICmpInst::ICMP_NE) {
+          uint32_t neq = spv.alloc_id();
+          spv.emit_op(cur_body, spv::OpLogicalNot, {bty, neq, eq_id});
+          val_map[ic] = neq;
+        } else {
+          val_map[ic] = eq_id;
+        }
+        return spv.error.empty();
+      }
+      uint32_t a = 0, b = 0;
+      if (op_ty->isIntegerTy(64) &&
+          (is_i64_index_only(ic->getOperand(0)) || is_i64_index_only(ic->getOperand(1)))) {
+        a = get_index_u32(ic->getOperand(0));
+        b = get_index_u32(ic->getOperand(1));
+      } else {
+        a = get_val(ic->getOperand(0));
+        b = get_val(ic->getOperand(1));
+      }
+      if (!a || !b) return false;
       bool is_bool = op_ty->getScalarType()->isIntegerTy(1);
       auto pred = ic->getPredicate();
       spv::Op op = spv::OpNop;
@@ -3194,10 +3971,31 @@ struct Compiler {
 
     if (auto *cast = llvm::dyn_cast<llvm::CastInst>(&inst)) {
       llvm::Value *src_v = cast->getOperand(0);
-      uint32_t src = get_val(src_v);
-      if (!src) return false;
       llvm::Type *sty = src_v->getType();
       llvm::Type *dty = cast->getType();
+      if (cast->getOpcode() == llvm::Instruction::Trunc && is_i64_index_only(src_v)) {
+        uint32_t u32_src = get_index_u32(src_v);
+        if (!u32_src) return false;
+        if (dty->isIntegerTy(32)) {
+          val_map[cast] = u32_src;
+          return true;
+        }
+        if (dty->isIntegerTy(1)) {
+          uint32_t u32 = spv.get_int(32);
+          uint32_t masked = spv.alloc_id();
+          spv.emit_op(cur_body, spv::OpBitwiseAnd, {u32, masked, u32_src, spv.get_const_u32(1u)});
+          uint32_t id = spv.alloc_id();
+          spv.emit_op(cur_body, spv::OpINotEqual, {rty, id, masked, spv.get_const_u32(0u)});
+          val_map[cast] = id;
+          return spv.error.empty();
+        }
+        uint32_t id = spv.alloc_id();
+        spv.emit_op(cur_body, spv::OpUConvert, {rty, id, u32_src});
+        val_map[cast] = id;
+        return spv.error.empty();
+      }
+      uint32_t src = get_val(src_v);
+      if (!src) return false;
 
       /* Handle bool (i1) <-> int conversions without invalid OpUConvert/OpSConvert on OpTypeBool. */
       if (sty->getScalarType()->isIntegerTy(1) &&
@@ -3457,14 +4255,21 @@ struct Compiler {
       if (exits.size() > 1) return spv.fail("multi-exit loop after StructurizeCFG");
       llvm::BasicBlock *Exit = exits[0];
 
-      /* Give this loop an exclusive merge block if Exit is shared or already claimed. */
+      /* Give this loop an exclusive merge block if Exit is shared, already claimed, or an enclosing loop's latch. */
+      bool is_parent_latch = false;
+      for (llvm::Loop *PL = L->getParentLoop(); PL; PL = PL->getParentLoop()) {
+        if (Exit == PL->getLoopLatch()) {
+          is_parent_latch = true;
+          break;
+        }
+      }
       llvm::SmallVector<llvm::BasicBlock *, 8> in_preds;
       bool has_ext_pred = false;
       for (llvm::BasicBlock *P : llvm::predecessors(Exit)) {
         if (L->contains(P)) in_preds.push_back(P);
         else has_ext_pred = true;
       }
-      if (has_ext_pred || claimed_targets.count(Exit) || Exit == H || Exit == Latch) {
+      if (has_ext_pred || is_parent_latch || claimed_targets.count(Exit) || Exit == H || Exit == Latch) {
         Exit = llvm::SplitBlockPredecessors(Exit, in_preds, ".spv.loop.merge", &DT, &LI);
       }
       claimed_targets.insert(Exit);
@@ -3565,17 +4370,19 @@ struct Compiler {
       if (!M || (L && LI.getLoopFor(M) != L) || M == loop_merge || M == loop_cont) {
         llvm::BasicBlock *s0 = bi->getSuccessor(0);
         llvm::BasicBlock *s1 = bi->getSuccessor(1);
-        if (L && (s0 == loop_merge || s0 == loop_cont) && s1 != loop_merge && s1 != loop_cont) {
+        bool s0_out = L && (!L->contains(s0) || s0 == loop_merge || s0 == loop_cont);
+        bool s1_out = L && (!L->contains(s1) || s1 == loop_merge || s1 == loop_cont);
+        if (s0_out && !s1_out) {
           M = s1;
-        } else if (L && (s1 == loop_merge || s1 == loop_cont) && s0 != loop_merge &&
-                   s0 != loop_cont) {
+        } else if (s1_out && !s0_out) {
           M = s0;
         }
       }
       if (!M) return spv.fail("unable to determine structured selection merge block");
 
-      /* Ensure M is exclusive (not shared with another merge or loop continue/merge). */
-      if (claimed_targets.count(M) || M == B || M == loop_merge || M == loop_cont) {
+      /* Ensure M is exclusive (not shared with another merge or loop continue/merge) and stays inside L. */
+      if (claimed_targets.count(M) || M == B || M == loop_merge || M == loop_cont ||
+          (L && !L->contains(M))) {
         llvm::SmallVector<llvm::BasicBlock *, 8> dom_preds;
         for (llvm::BasicBlock *P : llvm::predecessors(M)) {
           if (DT.dominates(B, P)) dom_preds.push_back(P);
@@ -3661,6 +4468,9 @@ struct Compiler {
           ptr_phi_info[&phi] = info;
           ptr_map[&phi] = info;
           phi_ids[&phi] = off_id;
+          uint32_t null_phi_id = spv.alloc_id();
+          ptr_phi_null_ids[&phi] = null_phi_id;
+          ptr_null_map[&phi] = null_phi_id;
         } else if (phi.getType()->isIntegerTy(64) && is_i64_index_only(&phi)) {
           uint32_t id = spv.alloc_id();
           narrowed_i64_phis.insert(&phi);
@@ -3754,6 +4564,8 @@ struct Compiler {
           if (phi.getType()->isPointerTy()) {
             if (llvm::isa<llvm::UndefValue>(inc) || llvm::isa<llvm::PoisonValue>(inc)) {
               inc_id = spv.get_undef(spv.get_int(32));
+            } else if (llvm::isa<llvm::ConstantPointerNull>(inc)) {
+              inc_id = spv.get_const_u32(0);
             } else {
               cur_body.clear();
               PtrInfo p = resolve_ptr(inc);
@@ -3788,6 +4600,24 @@ struct Compiler {
           return spv.fail("PHI node has no reachable predecessors");
         }
         spv.emit_op_vec(phi_words, spv::OpPhi, args);
+        if (phi.getType()->isPointerTy()) {
+          auto nit = ptr_phi_null_ids.find(&phi);
+          if (nit != ptr_phi_null_ids.end()) {
+            std::vector<uint32_t> nargs = {spv.get_bool(), nit->second};
+            std::unordered_map<uint32_t, uint32_t> nseen;
+            for (unsigned k = 0; k < phi.getNumIncomingValues(); k++) {
+              llvm::BasicBlock *pred = phi.getIncomingBlock(k);
+              auto lit = bb_label.find(pred);
+              if (lit == bb_label.end()) continue;
+              uint32_t nid = get_ptr_is_null(phi.getIncomingValue(k));
+              if (nseen.count(lit->second)) continue;
+              nseen[lit->second] = nid;
+              nargs.push_back(nid);
+              nargs.push_back(lit->second);
+            }
+            spv.emit_op_vec(phi_words, spv::OpPhi, nargs);
+          }
+        }
         if (!spv.error.empty()) return false;
       }
       bb_phis[bb] = std::move(phi_words);

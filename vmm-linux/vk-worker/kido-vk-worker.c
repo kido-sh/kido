@@ -124,6 +124,7 @@ typedef struct {
   uint32_t readonly_mask;
   vk_func_const_t *consts;
   uint32_t num_consts;
+  bool is_binary;
 } vk_function_t;
 
 typedef struct {
@@ -1999,7 +2000,7 @@ static VkPipeline get_or_create_vk_pipeline(worker_t *w,
   uint32_t off = 0;
   uint32_t dims[3] = {tx, ty, tz};
   for (uint32_t d = 0; d < 3; d++) {
-    entries[d].constantID = 1000u + d;
+    entries[d].constantID = 65536u + d;
     entries[d].offset = off;
     entries[d].size = 4;
     memcpy(sdata + off, &dims[d], 4);
@@ -2817,6 +2818,19 @@ static bool handle_commit(worker_t *w,
         vkCmdBindDescriptorSets(cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE, cur_pso->pipe_layout, 0, 1, &dset, 0, NULL);
       }
 
+      {
+        uint32_t ptr_pc[32] = {0};
+        for (uint32_t s = 0; s < 16u; s++) {
+          if (bound_is_bytes[s]) {
+            ptr_pc[s] = 0x80000000u | s;
+            ptr_pc[16u + s] = 0u;
+          } else if (bound_buf_idx[s] >= 0) {
+            ptr_pc[s] = (uint32_t)w->buffers[bound_buf_idx[s]].handle;
+            ptr_pc[16u + s] = (uint32_t)bound_off[s];
+          }
+        }
+        vkCmdPushConstants(cmd_buf, cur_pso->pipe_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ptr_pc), ptr_pc);
+      }
       vkCmdBindPipeline(cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
       vkCmdDispatch(cmd_buf, (uint32_t)ngx, (uint32_t)ngy, (uint32_t)ngz);
       emit_full_barrier(cmd_buf);
@@ -2880,6 +2894,19 @@ static bool handle_commit(worker_t *w,
         if (bad) break;
         vkUpdateDescriptorSets(w->device, nw, writes, 0, NULL);
         vkCmdBindDescriptorSets(cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE, cur_pso->pipe_layout, 0, 1, &dset, 0, NULL);
+      }
+      {
+        uint32_t ptr_pc[32] = {0};
+        for (uint32_t s = 0; s < 16u; s++) {
+          if (bound_is_bytes[s]) {
+            ptr_pc[s] = 0x80000000u | s;
+            ptr_pc[16u + s] = 0u;
+          } else if (bound_buf_idx[s] >= 0) {
+            ptr_pc[s] = (uint32_t)w->buffers[bound_buf_idx[s]].handle;
+            ptr_pc[16u + s] = (uint32_t)bound_off[s];
+          }
+        }
+        vkCmdPushConstants(cmd_buf, cur_pso->pipe_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ptr_pc), ptr_pc);
       }
       vkCmdBindPipeline(cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
       vkCmdDispatchIndirect(cmd_buf, w->buffers[ibidx].buffer, c.offset);
@@ -3576,7 +3603,7 @@ static bool handle_rpc(worker_t *w,
         uint32_t exp_len = kmtl_func_const_size(fc.data_type);
         uint64_t pad_len = align_up(fc.value_len, 8);
         if (exp_len == 0 || exp_len > 64 || fc.value_len < exp_len || pad_len > in_len - pos ||
-            fc.index > 65535u || (fc.index >= 1000u && fc.index <= 1002u)) {
+            fc.index > 65535u) {
           free(consts);
           return send_err(w->sock_fd, KMTL_ERR_INVAL, "invalid function constant", out_cap);
         }
@@ -3611,6 +3638,7 @@ static bool handle_rpc(worker_t *w,
           .has_int64 = w->has_int64,
           .max_workgroup_memory = w->props.limits.maxComputeSharedMemorySize,
           .subgroup_ops = w->subgroup_ops,
+          .subgroup_size = w->subgroup_size,
       };
       air2spv_result_t ar = {0};
       if (!compile_metallib_sandboxed(w, lib->binary, lib->binary_len, fn_name, &caps, &ar, err, sizeof(err))) {
@@ -3683,6 +3711,7 @@ static bool handle_rpc(worker_t *w,
     fn->readonly_mask = readonly_mask;
     fn->consts = consts;
     fn->num_consts = fr.num_constants;
+    fn->is_binary = lib->is_binary;
     w->total_fn_spirv_bytes += spirv_bytes;
 
     struct kmtl_resp_hdr resp = {0};
@@ -3755,10 +3784,17 @@ static bool handle_rpc(worker_t *w,
       return send_err(w->sock_fd, KMTL_ERR_COMPILE, "vkCreateDescriptorSetLayout failed", out_cap);
     }
 
+    VkPushConstantRange pcr = {
+        .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+        .offset = 0,
+        .size = 128,
+    };
     VkPipelineLayoutCreateInfo plci = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
         .setLayoutCount = 1,
         .pSetLayouts = &dsl,
+        .pushConstantRangeCount = 1,
+        .pPushConstantRanges = &pcr,
     };
     VkPipelineLayout pl = VK_NULL_HANDLE;
     if (vkCreatePipelineLayout(w->device, &plci, NULL, &pl) != VK_SUCCESS) {
@@ -3815,10 +3851,11 @@ static bool handle_rpc(worker_t *w,
     p->num_consts = fn->num_consts;
     p->num_specs = 0;
 
+    uint32_t eff_sg = (fn->is_binary && w->subgroup_size == 16u) ? 32u : w->subgroup_size;
     struct kmtl_resp_hdr resp = {0};
     resp.status = KMTL_OK;
     resp.handle = handle;
-    resp.arg0 = ((uint64_t)max_tg & 0xFFFFFFFFULL) | (((uint64_t)w->subgroup_size & 0xFFFFFFFFULL) << 32);
+    resp.arg0 = ((uint64_t)max_tg & 0xFFFFFFFFULL) | (((uint64_t)eff_sg & 0xFFFFFFFFULL) << 32);
     resp.arg1 = 0;
     return send_resp(w->sock_fd, resp, NULL, 0, out_cap);
   }

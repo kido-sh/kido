@@ -816,7 +816,7 @@ static bool translate_top_level(const char *s,
             snprintf(err_buf, err_cap, "malformed [[function_constant(...)]] index");
             return false;
           }
-          if (cid > 65535 || (cid >= 1000 && cid <= 1002)) {
+          if (cid > 65535) {
             snprintf(err_buf, err_cap, "function_constant index %lu out of allowed range", cid);
             return false;
           }
@@ -1186,7 +1186,7 @@ bool msl_translate_kernel(const char *src,
       sb_append(&final_src, "#extension GL_KHR_shader_subgroup_ballot : enable\n");
       sb_append(&final_src, "#extension GL_KHR_shader_subgroup_shuffle : enable\n");
     }
-    sb_append(&final_src, "layout(local_size_x_id = 1000, local_size_y_id = 1001, local_size_z_id = 1002) in;\n");
+    sb_append(&final_src, "layout(local_size_x_id = 65536, local_size_y_id = 65537, local_size_z_id = 65538) in;\n");
     size_t preamble_end = final_src.len;
     for (size_t m = 0; m < num_macros; m++) {
       sb_append(&final_src, "#define ");
