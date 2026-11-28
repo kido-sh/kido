@@ -4,8 +4,10 @@
 GO          ?= go
 CARGO       ?= cargo
 HOST_OS     := $(shell $(GO) env GOHOSTOS)
+HOST_ARCH   := $(shell $(GO) env GOHOSTARCH)
 TARGET_OS   ?= $(if $(GOOS),$(GOOS),$(HOST_OS))
 TARGET_ARCH ?= $(if $(GOARCH),$(GOARCH),arm64)
+HAVE_VULKAN_HDR := $(shell test -f /usr/include/vulkan/vulkan.h && echo yes || echo no)
 PREFIX      ?= /usr/local
 DESTDIR     ?=
 # Where builds and release archives go.
@@ -38,6 +40,10 @@ HAVE_VMM      := yes
 else ifeq ($(TARGET_OS)-$(TARGET_ARCH),linux-arm64)
 BINARIES      := kido kido-agent kido-vmm
 BUILD_TARGETS := $(OUT)/kido $(OUT)/kido-agent $(OUT)/kido-vmm
+ifeq ($(HOST_OS)-$(HOST_ARCH)-$(HAVE_VULKAN_HDR),linux-arm64-yes)
+BINARIES      += kido-probe
+BUILD_TARGETS += $(OUT)/kido-probe
+endif
 SIGN_DEP      := build
 KIDO_ENV      := CGO_ENABLED=0 GOOS=$(TARGET_OS) GOARCH=$(TARGET_ARCH)
 HAVE_VMM      := yes
@@ -107,6 +113,11 @@ $(OUT)/kido-vmm: $(VMM_LINUX_SOURCES)
 	@mkdir -p $(OUT)
 	cd vmm-linux && $(CARGO) build --release --locked --target aarch64-unknown-linux-musl
 	cp vmm-linux/target/aarch64-unknown-linux-musl/release/kido-vmm $@
+ifeq ($(HOST_OS)-$(HOST_ARCH)-$(HAVE_VULKAN_HDR),linux-arm64-yes)
+$(OUT)/kido-probe: vmm-linux/kido-probe/kido-probe.c vmm-linux/kido-probe/Makefile
+	@mkdir -p $(OUT)
+	$(MAKE) -C vmm-linux/kido-probe OUT="$(abspath $@)"
+endif
 endif
 
 ifeq ($(TARGET_OS),darwin)
@@ -137,6 +148,11 @@ dist: $(SIGN_DEP)
 ifeq ($(HAVE_VMM),yes)
 	install -m 0755 $(OUT)/kido-vmm $(DIST_ROOT)/libexec/kido/kido-vmm
 endif
+ifeq ($(TARGET_OS)-$(TARGET_ARCH),linux-arm64)
+	@for h in kido-vk-worker kido-probe; do \
+	  if [ -f "$(OUT)/$$h" ]; then install -m 0755 "$(OUT)/$$h" "$(DIST_ROOT)/libexec/kido/$$h"; fi; \
+	done
+endif
 	install -m 0644 README.md $(DIST_ROOT)/share/doc/kido/README.md
 	install -m 0644 LICENSE $(DIST_ROOT)/share/doc/kido/LICENSE
 	COPYFILE_DISABLE=1 tar -C $(DIST_ROOT) $(TAR_FLAGS) -czf $(DIST_TAR) bin libexec share
@@ -165,11 +181,17 @@ install: $(SIGN_DEP)
 ifeq ($(HAVE_VMM),yes)
 	install -m 0755 $(OUT)/kido-vmm $(LIBEXECDIR)/kido-vmm
 endif
+ifeq ($(TARGET_OS)-$(TARGET_ARCH),linux-arm64)
+	@for h in kido-vk-worker kido-probe; do \
+	  if [ -f "$(OUT)/$$h" ]; then echo "install -m 0755 $(OUT)/$$h $(LIBEXECDIR)/$$h"; \
+	    install -m 0755 "$(OUT)/$$h" "$(LIBEXECDIR)/$$h"; fi; \
+	done
+endif
 	install -m 0644 README.md $(DOCDIR)/README.md
 	install -m 0644 LICENSE $(DOCDIR)/LICENSE
 
 uninstall:
-	rm -f $(BINDIR)/kido $(LIBEXECDIR)/kido-agent $(LIBEXECDIR)/kido-vmm $(DOCDIR)/README.md $(DOCDIR)/LICENSE
+	rm -f $(BINDIR)/kido $(LIBEXECDIR)/kido-agent $(LIBEXECDIR)/kido-vmm $(LIBEXECDIR)/kido-vk-worker $(LIBEXECDIR)/kido-probe $(DOCDIR)/README.md $(DOCDIR)/LICENSE
 	-rmdir $(LIBEXECDIR) $(DOCDIR) 2>/dev/null
 
 ifeq ($(TARGET_OS),darwin)

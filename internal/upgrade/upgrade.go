@@ -59,6 +59,8 @@ var payload = []struct {
 }{
 	{"libexec/kido/kido-agent", 0o755},
 	{"libexec/kido/kido-vmm", 0o755},
+	{"libexec/kido/kido-vk-worker", 0o755},
+	{"libexec/kido/kido-probe", 0o755},
 	{"share/doc/kido/README.md", 0o644},
 	{"share/doc/kido/LICENSE", 0o644},
 	{"bin/kido", 0o755},
