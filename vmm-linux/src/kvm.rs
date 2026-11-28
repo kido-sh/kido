@@ -448,8 +448,9 @@ impl ShmDirtySync for KvmShmMapper {
             let mut span_start: Option<usize> = None;
             let mut span_end: usize = 0;
 
-            for w_idx in first_w..=last_nz {
-                let mut word = st.dirty_bitmap[w_idx];
+            for (rel_idx, &bitmap_word) in st.dirty_bitmap[first_w..=last_nz].iter().enumerate() {
+                let w_idx = first_w + rel_idx;
+                let mut word = bitmap_word;
                 if word == 0 {
                     if let Some(s) = span_start.take() {
                         let off = s * page_sz;
