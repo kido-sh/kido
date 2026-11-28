@@ -4984,7 +4984,7 @@ mod tests {
             names.push(name.to_string());
             pos += fuse_align8(FUSE_DIRENT_HDR_LEN + namelen);
         }
-        assert!(names.contains(&"m0".to_string()));
+        assert!(names.iter().any(|n| n == "m0"));
         let mut rel = vec![0u8; 24];
         rel[0..8].copy_from_slice(&root_dh.to_le_bytes());
         fs_dev
