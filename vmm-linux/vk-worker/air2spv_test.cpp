@@ -657,6 +657,373 @@ exit:
                                      sizeof(err)), err);
     validate_spirv_with_tool(res.spirv, res.spirv_bytes, "cross_cfg");
     std::free(res.spirv);
+
+    /* Post-inline readonly inference: binding 0 tagged air.read_write but never stored -> readonly bit set. */
+    const char *ir_infer_ro = R"IR(
+target datalayout = "e-p:64:64:64-i1:8:8-i32:32:32-f32:32:32"
+define void @infer_ro(ptr addrspace(1) %weights, ptr addrspace(1) %out, i32 %gid) {
+entry:
+  %wp = getelementptr inbounds float, ptr addrspace(1) %weights, i32 %gid
+  %w = load float, ptr addrspace(1) %wp, align 4
+  %op = getelementptr inbounds float, ptr addrspace(1) %out, i32 %gid
+  store float %w, ptr addrspace(1) %op, align 4
+  ret void
+}
+!air.kernel = !{!0}
+!0 = !{ptr @infer_ro, !1, !2}
+!1 = !{}
+!2 = !{!3, !4, !5}
+!3 = !{i32 0, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.read_write", !"air.address_space", i32 1}
+!4 = !{i32 1, !"air.buffer", !"air.location_index", i32 1, i32 1, !"air.read_write", !"air.address_space", i32 1}
+!5 = !{i32 2, !"air.thread_position_in_grid"}
+)IR";
+    auto bc_ro = assemble_ir_to_bitcode(ir_infer_ro);
+    CHECK_OK(air2spv_compile_bitcode(bc_ro.data(), bc_ro.size(), "infer_ro", &caps, &res, err,
+                                     sizeof(err)), err);
+    assert(res.binding_mask == 0x3u);
+    assert(res.readonly_mask == 0x1u);
+    validate_spirv_with_tool(res.spirv, res.spirv_bytes, "infer_ro");
+    std::free(res.spirv);
+
+    /* Two-buffer pointer select (gated_delta_net pattern) + downstream OpPhi in successor block. */
+    const char *ir_dual_sel = R"IR(
+target datalayout = "e-p:64:64:64-i1:8:8-i32:32:32-f32:32:32"
+define void @dual_buf_select(ptr addrspace(1) %src0, ptr addrspace(1) %src1, ptr addrspace(1) %dst0, ptr addrspace(1) %dst1, i32 %gid) {
+entry:
+  %c = icmp eq i32 %gid, 0
+  %sp = select i1 %c, ptr addrspace(1) %src0, ptr addrspace(1) %src1
+  %sp_off = getelementptr inbounds float, ptr addrspace(1) %sp, i32 %gid
+  %v = load float, ptr addrspace(1) %sp_off, align 4
+  %dp = select i1 %c, ptr addrspace(1) %dst0, ptr addrspace(1) %dst1
+  %dp_off = getelementptr inbounds float, ptr addrspace(1) %dp, i32 %gid
+  store float %v, ptr addrspace(1) %dp_off, align 4
+  br label %done
+done:
+  %p = phi float [ %v, %entry ]
+  store float %p, ptr addrspace(1) %dst0, align 4
+  ret void
+}
+!air.kernel = !{!0}
+!0 = !{ptr @dual_buf_select, !1, !2}
+!1 = !{}
+!2 = !{!3, !4, !5, !6, !7}
+!3 = !{i32 0, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.read_write", !"air.address_space", i32 1}
+!4 = !{i32 1, !"air.buffer", !"air.location_index", i32 1, i32 1, !"air.read_write", !"air.address_space", i32 1}
+!5 = !{i32 2, !"air.buffer", !"air.location_index", i32 2, i32 1, !"air.read_write", !"air.address_space", i32 1}
+!6 = !{i32 3, !"air.buffer", !"air.location_index", i32 3, i32 1, !"air.read_write", !"air.address_space", i32 1}
+!7 = !{i32 4, !"air.thread_position_in_grid"}
+)IR";
+    auto bc_ds = assemble_ir_to_bitcode(ir_dual_sel);
+    CHECK_OK(air2spv_compile_bitcode(bc_ds.data(), bc_ds.size(), "dual_buf_select", &caps, &res,
+                                     err, sizeof(err)), err);
+    assert(res.binding_mask == 0xFu);
+    assert(res.readonly_mask == 0x3u);
+    validate_spirv_with_tool(res.spirv, res.spirv_bytes, "dual_buf_select");
+    std::free(res.spirv);
+
+    /* Two-buffer pointer select inside a loop header (exact gated_delta_net pattern). */
+    const char *ir_dual_loop = R"IR(
+target datalayout = "e-p:64:64:64-i1:8:8-i32:32:32-f32:32:32"
+define void @dual_buf_loop_hdr(ptr addrspace(1) %dst0, ptr addrspace(1) %dst1, i32 %gid) {
+entry:
+  %c = icmp eq i32 %gid, 0
+  %dp = select i1 %c, ptr addrspace(1) %dst0, ptr addrspace(1) %dst1
+  br label %loop
+loop:
+  %i = phi i32 [ 0, %entry ], [ %ni, %loop ]
+  %p = getelementptr inbounds float, ptr addrspace(1) %dp, i32 %i
+  store float 1.000000e+00, ptr addrspace(1) %p, align 4
+  %ni = add i32 %i, 1
+  %more = icmp ult i32 %ni, 4
+  br i1 %more, label %loop, label %exit
+exit:
+  ret void
+}
+!air.kernel = !{!0}
+!0 = !{ptr @dual_buf_loop_hdr, !1, !2}
+!1 = !{}
+!2 = !{!3, !4, !5}
+!3 = !{i32 0, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.read_write", !"air.address_space", i32 1}
+!4 = !{i32 1, !"air.buffer", !"air.location_index", i32 1, i32 1, !"air.read_write", !"air.address_space", i32 1}
+!5 = !{i32 2, !"air.thread_position_in_grid"}
+)IR";
+    auto bc_dl = assemble_ir_to_bitcode(ir_dual_loop);
+    CHECK_OK(air2spv_compile_bitcode(bc_dl.data(), bc_dl.size(), "dual_buf_loop_hdr", &caps, &res,
+                                     err, sizeof(err)), err);
+    assert(res.binding_mask == 0x3u);
+    assert(res.readonly_mask == 0x0u);
+    validate_spirv_with_tool(res.spirv, res.spirv_bytes, "dual_buf_loop_hdr");
+    std::free(res.spirv);
+
+    /* Software bfloat16 load/fpext/arithmetic/fptrunc/store without VK_KHR_shader_bfloat16. */
+    const char *ir_bf16 = R"IR(
+target datalayout = "e-p:64:64:64-i1:8:8-i16:16:16-i32:32:32-f32:32:32"
+define void @bf16_roundtrip(ptr addrspace(1) %in, ptr addrspace(1) %out, i32 %gid) {
+entry:
+  %ip = getelementptr inbounds bfloat, ptr addrspace(1) %in, i32 %gid
+  %b = load bfloat, ptr addrspace(1) %ip, align 2
+  %f = fpext bfloat %b to float
+  %f2 = fadd float %f, 1.500000e+00
+  %b2 = fptrunc float %f2 to bfloat
+  %bn = fneg bfloat %b2
+  %op = getelementptr inbounds bfloat, ptr addrspace(1) %out, i32 %gid
+  store bfloat %bn, ptr addrspace(1) %op, align 2
+  ret void
+}
+!air.kernel = !{!0}
+!0 = !{ptr @bf16_roundtrip, !1, !2}
+!1 = !{}
+!2 = !{!3, !4, !5}
+!3 = !{i32 0, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.read", !"air.address_space", i32 1}
+!4 = !{i32 1, !"air.buffer", !"air.location_index", i32 1, i32 1, !"air.read_write", !"air.address_space", i32 1}
+!5 = !{i32 2, !"air.thread_position_in_grid"}
+)IR";
+    auto bc_bf = assemble_ir_to_bitcode(ir_bf16);
+    CHECK_OK(air2spv_compile_bitcode(bc_bf.data(), bc_bf.size(), "bf16_roundtrip", &caps, &res,
+                                     err, sizeof(err)), err);
+    assert(res.binding_mask == 0x3u);
+    assert(res.readonly_mask == 0x1u);
+    validate_spirv_with_tool(res.spirv, res.spirv_bytes, "bf16_roundtrip");
+    std::free(res.spirv);
+
+    /* Two-buffer pointer PHI (exact kernel_concat_f32 pattern). */
+    const char *ir_dual_phi = R"IR(
+target datalayout = "e-p:64:64:64-i1:8:8-i32:32:32-f32:32:32"
+define void @dual_buf_phi(ptr addrspace(1) %a, ptr addrspace(1) %b, ptr addrspace(1) %dst, i32 %gid) {
+entry:
+  %c = icmp ult i32 %gid, 4
+  br i1 %c, label %lhs, label %rhs
+lhs:
+  %pa = getelementptr inbounds float, ptr addrspace(1) %a, i32 %gid
+  br label %merge
+rhs:
+  %idx = sub i32 %gid, 4
+  %pb = getelementptr inbounds float, ptr addrspace(1) %b, i32 %idx
+  br label %merge
+merge:
+  %p = phi ptr addrspace(1) [ %pa, %lhs ], [ %pb, %rhs ]
+  %v = load float, ptr addrspace(1) %p, align 4
+  %dp = getelementptr inbounds float, ptr addrspace(1) %dst, i32 %gid
+  store float %v, ptr addrspace(1) %dp, align 4
+  ret void
+}
+!air.kernel = !{!0}
+!0 = !{ptr @dual_buf_phi, !1, !2}
+!1 = !{}
+!2 = !{!3, !4, !5, !6}
+!3 = !{i32 0, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.read_write", !"air.address_space", i32 1}
+!4 = !{i32 1, !"air.buffer", !"air.location_index", i32 1, i32 1, !"air.read_write", !"air.address_space", i32 1}
+!5 = !{i32 2, !"air.buffer", !"air.location_index", i32 2, i32 1, !"air.read_write", !"air.address_space", i32 1}
+!6 = !{i32 3, !"air.thread_position_in_grid"}
+)IR";
+    auto bc_dp = assemble_ir_to_bitcode(ir_dual_phi);
+    CHECK_OK(air2spv_compile_bitcode(bc_dp.data(), bc_dp.size(), "dual_buf_phi", &caps, &res,
+                                     err, sizeof(err)), err);
+    assert(res.binding_mask == 0x7u);
+    assert(res.readonly_mask == 0x3u);
+    validate_spirv_with_tool(res.spirv, res.spirv_bytes, "dual_buf_phi");
+    std::free(res.spirv);
+
+    /* ptrtoint alignment check (exact concat_copy pattern). */
+    const char *ir_p2i = R"IR(
+target datalayout = "e-p:64:64:64-i1:8:8-i32:32:32-i64:64:64-f32:32:32"
+define void @ptrtoint_align(ptr addrspace(1) %src, ptr addrspace(1) %dst, i32 %gid) {
+entry:
+  %a = ptrtoint ptr addrspace(1) %src to i64
+  %b = ptrtoint ptr addrspace(1) %dst to i64
+  %x = xor i64 %a, %b
+  %m = and i64 %x, 15
+  %ok = icmp eq i64 %m, 0
+  %v = select i1 %ok, float 1.000000e+00, float 2.000000e+00
+  %dp = getelementptr inbounds float, ptr addrspace(1) %dst, i32 %gid
+  store float %v, ptr addrspace(1) %dp, align 4
+  ret void
+}
+!air.kernel = !{!0}
+!0 = !{ptr @ptrtoint_align, !1, !2}
+!1 = !{}
+!2 = !{!3, !4, !5}
+!3 = !{i32 0, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.read", !"air.address_space", i32 1}
+!4 = !{i32 1, !"air.buffer", !"air.location_index", i32 1, i32 1, !"air.read_write", !"air.address_space", i32 1}
+!5 = !{i32 2, !"air.thread_position_in_grid"}
+)IR";
+    auto bc_p2i = assemble_ir_to_bitcode(ir_p2i);
+    air2spv_caps_t caps_sub = caps;
+    caps_sub.ssbo_offset_align = 64;
+    CHECK_OK(air2spv_compile_bitcode(bc_p2i.data(), bc_p2i.size(), "ptrtoint_align", &caps_sub, &res,
+                                     err, sizeof(err)), err);
+    assert(res.binding_mask == 0x3u);
+    assert(res.readonly_mask == 0x1u);
+    validate_spirv_with_tool(res.spirv, res.spirv_bytes, "ptrtoint_align");
+    std::free(res.spirv);
+
+    /* Magic 64-bit unsigned division (tid / 3) must validate under both has_int64=false (UMulExtended) and true. */
+    const char *ir_magic_div = R"IR(
+target datalayout = "e-p:64:64:64-i1:8:8-i32:32:32-i64:64:64"
+define void @magic_div_u32(ptr addrspace(1) %dst, i32 %gid) {
+entry:
+  %a = zext i32 %gid to i64
+  %m = mul nuw i64 %a, 2863311531
+  %q = lshr i64 %m, 33
+  %r = trunc i64 %q to i32
+  %dp = getelementptr inbounds i32, ptr addrspace(1) %dst, i32 %gid
+  store i32 %r, ptr addrspace(1) %dp, align 4
+  ret void
+}
+!air.kernel = !{!0}
+!0 = !{ptr @magic_div_u32, !1, !2}
+!1 = !{}
+!2 = !{!3, !4}
+!3 = !{i32 0, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.read_write", !"air.address_space", i32 1}
+!4 = !{i32 1, !"air.thread_position_in_grid"}
+)IR";
+    auto bc_mdiv = assemble_ir_to_bitcode(ir_magic_div);
+    CHECK_OK(air2spv_compile_bitcode(bc_mdiv.data(), bc_mdiv.size(), "magic_div_u32", &caps, &res,
+                                     err, sizeof(err)), err);
+    validate_spirv_with_tool(res.spirv, res.spirv_bytes, "magic_div_u32_no64");
+    std::free(res.spirv);
+    air2spv_caps_t caps64 = caps;
+    caps64.has_int64 = true;
+    CHECK_OK(air2spv_compile_bitcode(bc_mdiv.data(), bc_mdiv.size(), "magic_div_u32", &caps64, &res,
+                                     err, sizeof(err)), err);
+    validate_spirv_with_tool(res.spirv, res.spirv_bytes, "magic_div_u32_i64");
+    std::free(res.spirv);
+
+    /* shl i64 32 + ashr i64 32 (32-bit sign-extension idiom in kernel_cpy_f32_f32) with zero Int64/shift UB. */
+    const char *ir_sext32 = R"IR(
+target datalayout = "e-p:64:64:64-i1:8:8-i32:32:32-i64:64:64"
+define void @sext32_idiom(ptr addrspace(1) %dst, i32 %gid) {
+entry:
+  %a = sext i32 %gid to i64
+  %s = shl i64 %a, 32
+  %e = ashr exact i64 %s, 32
+  %dp = getelementptr inbounds i32, ptr addrspace(1) %dst, i64 %e
+  store i32 %gid, ptr addrspace(1) %dp, align 4
+  ret void
+}
+!air.kernel = !{!0}
+!0 = !{ptr @sext32_idiom, !1, !2}
+!1 = !{}
+!2 = !{!3, !4}
+!3 = !{i32 0, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.read_write", !"air.address_space", i32 1}
+!4 = !{i32 1, !"air.thread_position_in_grid"}
+)IR";
+    auto bc_sx = assemble_ir_to_bitcode(ir_sext32);
+    CHECK_OK(air2spv_compile_bitcode(bc_sx.data(), bc_sx.size(), "sext32_idiom", &caps, &res,
+                                     err, sizeof(err)), err);
+    validate_spirv_with_tool(res.spirv, res.spirv_bytes, "sext32_idiom");
+    std::free(res.spirv);
+
+    /* Unmasked ptrtoint comparison must NOT narrow (discarding hi32) on !has_int64 GPUs. */
+    const char *ir_p2i_cmp = R"IR(
+target datalayout = "e-p:64:64:64-i1:8:8-i32:32:32-i64:64:64"
+define void @ptrtoint_cmp(ptr addrspace(1) %a, ptr addrspace(1) %b, ptr addrspace(1) %dst, i32 %gid) {
+entry:
+  %ia = ptrtoint ptr addrspace(1) %a to i64
+  %ib = ptrtoint ptr addrspace(1) %b to i64
+  %eq = icmp eq i64 %ia, %ib
+  %v = zext i1 %eq to i32
+  %dp = getelementptr inbounds i32, ptr addrspace(1) %dst, i32 %gid
+  store i32 %v, ptr addrspace(1) %dp, align 4
+  ret void
+}
+!air.kernel = !{!0}
+!0 = !{ptr @ptrtoint_cmp, !1, !2}
+!1 = !{}
+!2 = !{!3, !4, !5, !6}
+!3 = !{i32 0, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.read", !"air.address_space", i32 1}
+!4 = !{i32 1, !"air.buffer", !"air.location_index", i32 1, i32 1, !"air.read", !"air.address_space", i32 1}
+!5 = !{i32 2, !"air.buffer", !"air.location_index", i32 2, i32 1, !"air.read_write", !"air.address_space", i32 1}
+!6 = !{i32 3, !"air.thread_position_in_grid"}
+)IR";
+    auto bc_p2i_cmp = assemble_ir_to_bitcode(ir_p2i_cmp);
+    assert(!air2spv_compile_bitcode(bc_p2i_cmp.data(), bc_p2i_cmp.size(), "ptrtoint_cmp", &caps,
+                                    &res, err, sizeof(err)));
+    CHECK_OK(air2spv_compile_bitcode(bc_p2i_cmp.data(), bc_p2i_cmp.size(), "ptrtoint_cmp", &caps64,
+                                     &res, err, sizeof(err)), err);
+    validate_spirv_with_tool(res.spirv, res.spirv_bytes, "ptrtoint_cmp_i64");
+    std::free(res.spirv);
+
+    /* Software BF16 math + dot + 32-lane emulated subgroup reduce/scan/shuffle/barrier on subgroup_size=16. */
+    const char *ir_bf16_sg = R"IR(
+target datalayout = "e-p:64:64:64-i1:8:8-i16:16:16-i32:32:32-f32:32:32"
+declare bfloat @air.fast_exp.bf16(bfloat)
+declare bfloat @air.fma.bf16(bfloat, bfloat, bfloat)
+declare bfloat @air.dot.v2bf16(<2 x bfloat>, <2 x bfloat>)
+declare bfloat @air.simd_sum.bf16(bfloat)
+declare float @air.simd_prefix_exclusive_sum.f32(float)
+declare float @air.simd_shuffle_down.f32(float, i16)
+declare void @air.simdgroup.barrier(i32, i32)
+define void @bf16_sg16_ops(ptr addrspace(1) %in, ptr addrspace(1) %out, i32 %gid) {
+entry:
+  %ip = getelementptr inbounds <2 x bfloat>, ptr addrspace(1) %in, i32 %gid
+  %v2 = load <2 x bfloat>, ptr addrspace(1) %ip, align 4
+  %d = call bfloat @air.dot.v2bf16(<2 x bfloat> %v2, <2 x bfloat> %v2)
+  %e = call bfloat @air.fast_exp.bf16(bfloat %d)
+  %fm = call bfloat @air.fma.bf16(bfloat %e, bfloat %d, bfloat %e)
+  %sm = call bfloat @air.simd_sum.bf16(bfloat %fm)
+  call void @air.simdgroup.barrier(i32 2, i32 0)
+  %sf = fpext bfloat %sm to float
+  %ps = call float @air.simd_prefix_exclusive_sum.f32(float %sf)
+  %sh = call float @air.simd_shuffle_down.f32(float %ps, i16 16)
+  %res = fptrunc float %sh to bfloat
+  %op = getelementptr inbounds bfloat, ptr addrspace(1) %out, i32 %gid
+  store bfloat %res, ptr addrspace(1) %op, align 2
+  ret void
+}
+!air.kernel = !{!0}
+!0 = !{ptr @bf16_sg16_ops, !1, !2}
+!1 = !{}
+!2 = !{!3, !4, !5}
+!3 = !{i32 0, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.read", !"air.address_space", i32 1}
+!4 = !{i32 1, !"air.buffer", !"air.location_index", i32 1, i32 1, !"air.read_write", !"air.address_space", i32 1}
+!5 = !{i32 2, !"air.thread_position_in_grid"}
+)IR";
+    auto bc_bfsg = assemble_ir_to_bitcode(ir_bf16_sg);
+    air2spv_caps_t caps16 = caps;
+    caps16.subgroup_size = 16;
+    CHECK_OK(air2spv_compile_bitcode(bc_bfsg.data(), bc_bfsg.size(), "bf16_sg16_ops", &caps16, &res,
+                                     err, sizeof(err)), err);
+    validate_spirv_with_tool(res.spirv, res.spirv_bytes, "bf16_sg16_ops");
+    std::free(res.spirv);
+
+    /* Loop-carried dual-root pointer PHI initialized from a two-buffer select (canonical root order). */
+    const char *ir_sel_phi = R"IR(
+target datalayout = "e-p:64:64:64-i1:8:8-i32:32:32-f32:32:32"
+define void @dual_select_loop_phi(ptr addrspace(1) %a, ptr addrspace(1) %b, ptr addrspace(1) %dst, i32 %gid) {
+entry:
+  %c = icmp eq i32 %gid, 0
+  %p0 = select i1 %c, ptr addrspace(1) %b, ptr addrspace(1) %a
+  br label %loop
+loop:
+  %i = phi i32 [ 0, %entry ], [ %ni, %loop ]
+  %p = phi ptr addrspace(1) [ %p0, %entry ], [ %np, %loop ]
+  %v = load float, ptr addrspace(1) %p, align 4
+  %dp = getelementptr inbounds float, ptr addrspace(1) %dst, i32 %i
+  store float %v, ptr addrspace(1) %dp, align 4
+  %np = getelementptr inbounds float, ptr addrspace(1) %p, i32 1
+  %ni = add i32 %i, 1
+  %more = icmp ult i32 %ni, 4
+  br i1 %more, label %loop, label %exit
+exit:
+  ret void
+}
+!air.kernel = !{!0}
+!0 = !{ptr @dual_select_loop_phi, !1, !2}
+!1 = !{}
+!2 = !{!3, !4, !5, !6}
+!3 = !{i32 0, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.read", !"air.address_space", i32 1}
+!4 = !{i32 1, !"air.buffer", !"air.location_index", i32 1, i32 1, !"air.read", !"air.address_space", i32 1}
+!5 = !{i32 2, !"air.buffer", !"air.location_index", i32 2, i32 1, !"air.read_write", !"air.address_space", i32 1}
+!6 = !{i32 3, !"air.thread_position_in_grid"}
+)IR";
+    auto bc_sphi = assemble_ir_to_bitcode(ir_sel_phi);
+    CHECK_OK(air2spv_compile_bitcode(bc_sphi.data(), bc_sphi.size(), "dual_select_loop_phi", &caps,
+                                     &res, err, sizeof(err)), err);
+    assert(res.binding_mask == 0x7u);
+    assert(res.readonly_mask == 0x3u);
+    validate_spirv_with_tool(res.spirv, res.spirv_bytes, "dual_select_loop_phi");
+    std::free(res.spirv);
   }
 #undef CHECK_OK
 
@@ -841,6 +1208,22 @@ define void @bad_shuffle_struct(ptr addrspace(1) %p, i32 %gid) {
 !2 = !{!3, !4}
 !3 = !{i32 0, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.read_write", !"air.address_space", i32 1}
 !4 = !{i32 1, !"air.thread_position_in_grid"}
+)IR"},
+      /* Mismatched load type from function constant global */
+      {"bad_fc_type_mismatch", R"IR(
+@fc0 = external addrspace(2) constant i32
+define void @bad_fc_type_mismatch(ptr addrspace(1) %p) {
+  %v = load float, ptr addrspace(2) @fc0, align 4
+  store float %v, ptr addrspace(1) %p, align 4
+  ret void
+}
+!air.kernel = !{!0}
+!air.function_constants = !{!10}
+!0 = !{ptr @bad_fc_type_mismatch, !1, !2}
+!1 = !{}
+!2 = !{!3}
+!3 = !{i32 0, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.read_write", !"air.address_space", i32 1}
+!10 = !{ptr addrspace(2) @fc0, !"air.location_index", i32 0}
 )IR"},
   };
   for (const auto &tc : hostile_cases) {

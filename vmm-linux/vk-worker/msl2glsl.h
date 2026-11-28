@@ -24,7 +24,8 @@ typedef struct {
 
 /*
  * Scan MSL source for `kernel void <name>(` declarations and encode NUL-separated
- * names into out_buf (matching encodeFunctionNames in vmm/metal.m).
+ * names into out_buf (matching encodeFunctionNames in vmm/metal.m). When out_buf
+ * is NULL, returns the exact byte length required for all discovered kernel names.
  */
 size_t msl_extract_kernel_names(const char *src, size_t src_len, char *out_buf, size_t out_cap);
 

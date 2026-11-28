@@ -15,6 +15,7 @@ const USED_HDR_SIZE: u64 = 4;
 const USED_ELEM_SIZE: u64 = 8;
 
 pub const MAX_CHAIN_BYTES: u64 = 66 * 1024 * 1024;
+pub const MAX_INDIRECT_DESCS: u32 = 32_768;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Descriptor {
@@ -289,7 +290,7 @@ impl VirtQueue {
                     return Err(QueueError::InvalidIndirect);
                 }
                 let ind_count = desc.len / 16;
-                if ind_count > self.size as u32 {
+                if ind_count > MAX_INDIRECT_DESCS {
                     return Err(QueueError::ChainTooLong);
                 }
                 if mem.validate_range(desc.addr, desc.len as usize).is_err() {
@@ -534,5 +535,54 @@ mod tests {
         mem.store_u16_le(avail + 10, 2, Ordering::Release).unwrap();
         mem.store_u16_le(avail + 2, 4, Ordering::Release).unwrap();
         assert_eq!(q.pop_avail(&mem), Err(QueueError::InvalidIndirect));
+    }
+
+    #[test]
+    fn indirect_table_exceeding_queue_size_succeeds_and_caps_at_max() {
+        let mem = GuestMemory::from_vec(RAM_BASE, vec![0u8; 1024 * 1024]);
+        let (mut q, desc, avail, _) = setup_queue(&mem, 8);
+        let ind_table = RAM_BASE + 0x10000;
+        let data_base = RAM_BASE + 0x20000;
+        let count: u16 = 200;
+        for i in 0..count {
+            let flags = if i + 1 < count { VRING_DESC_F_NEXT } else { VRING_DESC_F_WRITE };
+            let next = if i + 1 < count { i + 1 } else { 0 };
+            write_desc(
+                &mem,
+                ind_table,
+                i,
+                data_base + (i as u64) * 64,
+                64,
+                flags,
+                next,
+            );
+        }
+        write_desc(
+            &mem,
+            desc,
+            0,
+            ind_table,
+            (count as u32) * 16,
+            VRING_DESC_F_INDIRECT,
+            0,
+        );
+        mem.store_u16_le(avail + 4, 0, Ordering::Release).unwrap();
+        mem.store_u16_le(avail + 2, 1, Ordering::Release).unwrap();
+
+        let chain = q.pop_avail(&mem).unwrap().unwrap();
+        assert_eq!(chain.descriptors.len(), count as usize);
+
+        write_desc(
+            &mem,
+            desc,
+            1,
+            ind_table,
+            (MAX_INDIRECT_DESCS + 1) * 16,
+            VRING_DESC_F_INDIRECT,
+            0,
+        );
+        mem.store_u16_le(avail + 6, 1, Ordering::Release).unwrap();
+        mem.store_u16_le(avail + 2, 2, Ordering::Release).unwrap();
+        assert_eq!(q.pop_avail(&mem), Err(QueueError::ChainTooLong));
     }
 }

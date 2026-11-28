@@ -676,7 +676,8 @@ impl VirtioDevice for VirtioMetalAdapter {
                 Ok(Some(c)) => c,
                 Ok(None) => break,
                 Err(QueueError::NotReady) => break,
-                Err(_) => {
+                Err(e) => {
+                    eprintln!("kido-vmm: virtio-metal queue pop error: {e:?}");
                     return QueueOutcome {
                         raise_irq,
                         needs_reset: true,

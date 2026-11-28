@@ -49,7 +49,8 @@ void metallib_index_free(metallib_index_t *idx);
 
 /*
  * Encode NUL-separated compute kernel names into out_buf (same wire format as
- * msl_extract_kernel_names).
+ * msl_extract_kernel_names). When out_buf is NULL, returns the exact byte
+ * length required to hold all compute kernel names.
  */
 size_t metallib_encode_compute_names(const metallib_index_t *idx, char *out_buf, size_t out_cap);
 

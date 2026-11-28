@@ -364,6 +364,11 @@ impl ShmRegionMapper for KvmShmMapper {
         }
         st.dirty_log_enabled = dirty_enabled;
         st.gpa = Some(gpa);
+        eprintln!(
+            "kido-vmm: virtio-metal SHM mapped at gpa={gpa:#x} size={} MiB dirty_log={dirty_enabled} manual_clear={}",
+            shm_size >> 20,
+            self.manual_dirty_clear
+        );
         Ok(())
     }
 

@@ -340,13 +340,17 @@ extern "C" void metallib_index_free(metallib_index_t *idx) {
 extern "C" size_t metallib_encode_compute_names(const metallib_index_t *idx,
                                                 char *out_buf,
                                                 size_t out_cap) {
-  if (!idx || !out_buf || out_cap == 0) return 0;
+  if (!idx) return 0;
+  if (out_buf && out_cap == 0) return 0;
   size_t pos = 0;
   for (size_t i = 0; i < idx->count; i++) {
     if (idx->funcs[i].fn_type != METALLIB_FN_COMPUTE) continue;
     size_t nlen = std::strlen(idx->funcs[i].name);
-    if (nlen == 0 || nlen + 1u > out_cap - pos) break;
-    std::memcpy(out_buf + pos, idx->funcs[i].name, nlen + 1u);
+    if (nlen == 0) continue;
+    if (out_buf) {
+      if (nlen + 1u > out_cap - pos) break;
+      std::memcpy(out_buf + pos, idx->funcs[i].name, nlen + 1u);
+    }
     pos += nlen + 1u;
   }
   return pos;

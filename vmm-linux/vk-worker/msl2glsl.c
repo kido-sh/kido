@@ -480,7 +480,8 @@ static bool find_kernels(const char *s, size_t len, kernel_span_t **out_spans, s
 }
 
 size_t msl_extract_kernel_names(const char *src, size_t src_len, char *out_buf, size_t out_cap) {
-  if (!src || src_len == 0 || !out_buf || out_cap == 0) return 0;
+  if (!src || src_len == 0) return 0;
+  if (out_buf && out_cap == 0) return 0;
   strbuf_t clean;
   if (!strip_comments(src, src_len, &clean)) {
     sb_free(&clean);
@@ -495,8 +496,10 @@ size_t msl_extract_kernel_names(const char *src, size_t src_len, char *out_buf, 
   size_t pos = 0;
   for (size_t i = 0; i < n; i++) {
     size_t nl = strlen(spans[i].name);
-    if (nl + 1 > out_cap - pos) break;
-    memcpy(out_buf + pos, spans[i].name, nl + 1);
+    if (out_buf) {
+      if (nl + 1 > out_cap - pos) break;
+      memcpy(out_buf + pos, spans[i].name, nl + 1);
+    }
     pos += nl + 1;
   }
   free(spans);

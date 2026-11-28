@@ -29,6 +29,7 @@ typedef struct {
   uint32_t max_workgroup_memory;
   uint32_t subgroup_ops; /* Bitmask of AIR2SPV_SUBGROUP_* (matches VkSubgroupFeatureFlagBits). */
   uint32_t subgroup_size; /* Hardware Vulkan subgroupSize (e.g. 16 on Mali/V3D -> virtual 32-wide emulation). */
+  uint32_t ssbo_offset_align; /* Vulkan minStorageBufferOffsetAlignment (power of 2; 0/1 = disabled). */
 } air2spv_caps_t;
 
 typedef struct {

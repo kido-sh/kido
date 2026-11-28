@@ -55,9 +55,17 @@ API_AVAILABLE(macos(27.0))
 @property (nonatomic) NSUInteger pendingLibraries;
 @property (nonatomic) NSUInteger pendingFunctions;
 @property (nonatomic) NSUInteger pendingPipelines;
+@property (nonatomic, strong) dispatch_group_t pendingMapsGroup;
 @end
 
 @implementation KidoMetalClientState
+- (instancetype)init {
+  self = [super init];
+  if (self) {
+    _pendingMapsGroup = dispatch_group_create();
+  }
+  return self;
+}
 @end
 
 @interface KidoMetalBufferSlot : NSObject
@@ -72,6 +80,7 @@ API_AVAILABLE(macos(27.0))
 @property (nonatomic) BOOL destroyed;
 @property (nonatomic) BOOL unmapping;
 @property (nonatomic) BOOL quarantined;
+@property (nonatomic, strong, nullable) NSMutableArray<dispatch_group_t> *releaseGroups;
 @end
 
 @implementation KidoMetalBufferSlot
@@ -148,6 +157,7 @@ API_AVAILABLE(macos(27.0))
 @property (nonatomic, strong) NSMutableDictionary<NSNumber *, KidoMetalClientState *> *clients;
 @property (nonatomic, strong) NSMutableSet<KidoMetalPendingElem *> *pendingElems;
 @property (nonatomic, strong) NSMutableDictionary<NSNumber *, KidoMetalBufferSlot *> *buffers;
+@property (nonatomic, strong) NSMutableSet<KidoMetalBufferSlot *> *drainingBuffers;
 @property (nonatomic, strong) NSMutableDictionary<NSNumber *, KidoMetalObjEntry *> *libraries;
 @property (nonatomic, strong) NSMutableDictionary<NSNumber *, KidoMetalObjEntry *> *functions;
 @property (nonatomic, strong) NSMutableDictionary<NSNumber *, KidoMetalObjEntry *> *pipelines;
@@ -304,6 +314,7 @@ static NSData *_Nullable encodeFunctionNames(id<MTLLibrary> lib, uint32_t maxByt
   _clients = [NSMutableDictionary dictionary];
   _pendingElems = [NSMutableSet set];
   _buffers = [NSMutableDictionary dictionary];
+  _drainingBuffers = [NSMutableSet set];
   _libraries = [NSMutableDictionary dictionary];
   _functions = [NSMutableDictionary dictionary];
   _pipelines = [NSMutableDictionary dictionary];
@@ -429,9 +440,35 @@ static NSData *_Nullable encodeFunctionNames(id<MTLLibrary> lib, uint32_t maxByt
 
 #pragma mark - Resource Teardown
 
+- (void)signalBufferReleaseGroups:(KidoMetalBufferSlot *)slot {
+  if (slot.releaseGroups.count == 0) return;
+  NSArray<dispatch_group_t> *groups = [slot.releaseGroups copy];
+  [slot.releaseGroups removeAllObjects];
+  for (dispatch_group_t g in groups) {
+    dispatch_group_leave(g);
+  }
+}
+
+- (void)attachReleaseGroup:(dispatch_group_t)group toBufferSlot:(KidoMetalBufferSlot *)slot {
+  if (!group || !slot || slot.quarantined) return;
+  if (!slot.releaseGroups) slot.releaseGroups = [NSMutableArray array];
+  dispatch_group_enter(group);
+  [slot.releaseGroups addObject:group];
+}
+
 - (void)maybeReleaseBufferSlot:(KidoMetalBufferSlot *)slot {
-  if (!slot.destroyed || slot.inFlightRefs > 0 || slot.unmapping || slot.quarantined) return;
+  if (!slot.destroyed) return;
+  if (slot.quarantined) {
+    [self.drainingBuffers removeObject:slot];
+    [self signalBufferReleaseGroups:slot];
+    return;
+  }
+  if (slot.inFlightRefs > 0 || slot.unmapping) {
+    [self.drainingBuffers addObject:slot];
+    return;
+  }
   slot.unmapping = YES;
+  [self.drainingBuffers addObject:slot];
   uint64_t off = slot.shmOffset;
   uint64_t len = slot.alignedLen;
   void *ptr = slot.hostPtr;
@@ -443,6 +480,7 @@ static NSData *_Nullable encodeFunctionNames(id<MTLLibrary> lib, uint32_t maxByt
                         size:len
            completionHandler:^(NSError *_Nullable err) {
              slot.mtlBuffer = nil;
+             [self.drainingBuffers removeObject:slot];
              if (err) {
                /* Keep host mapping and SHM range quarantined so guest PTEs cannot alias freed memory. */
                slot.quarantined = YES;
@@ -450,19 +488,23 @@ static NSData *_Nullable encodeFunctionNames(id<MTLLibrary> lib, uint32_t maxByt
                kido_vmm_logf("virtio-metal: unmapMemory failed at 0x%llx (%llu B): %s",
                              (unsigned long long)off, (unsigned long long)len,
                              err.localizedDescription.UTF8String);
+               [self signalBufferReleaseGroups:slot];
                return;
              }
              if (ptr) munmap(ptr, (size_t)len);
              if (self.usedBytes >= len) self.usedBytes -= len;
              else self.usedBytes = 0;
              kmtl_shm_free(&self->_shmAlloc, off, len);
+             [self signalBufferReleaseGroups:slot];
            }];
   } else {
     slot.mtlBuffer = nil;
+    [self.drainingBuffers removeObject:slot];
     if (ptr) munmap(ptr, (size_t)len);
     if (self.usedBytes >= len) self.usedBytes -= len;
     else self.usedBytes = 0;
     kmtl_shm_free(&self->_shmAlloc, off, len);
+    [self signalBufferReleaseGroups:slot];
   }
 }
 
@@ -524,8 +566,16 @@ static NSData *_Nullable encodeFunctionNames(id<MTLLibrary> lib, uint32_t maxByt
   [self completePendingElem:pe resp:resp extra:NULL extraLen:0];
 }
 
-- (void)closeClient:(uint32_t)clientId {
+- (void)closeClient:(uint32_t)clientId group:(dispatch_group_t _Nullable)group {
+  KidoMetalClientState *cs = self.clients[@(clientId)];
   [self.clients removeObjectForKey:@(clientId)];
+  if (cs && group && cs.pendingMapsGroup &&
+      dispatch_group_wait(cs.pendingMapsGroup, DISPATCH_TIME_NOW) != 0) {
+    dispatch_group_enter(group);
+    dispatch_group_notify(cs.pendingMapsGroup, self.deviceQueue, ^{
+      dispatch_group_leave(group);
+    });
+  }
 
   NSMutableArray<NSNumber *> *dropQueues = [NSMutableArray array];
   for (NSNumber *k in self.queues) {
@@ -547,16 +597,29 @@ static NSData *_Nullable encodeFunctionNames(id<MTLLibrary> lib, uint32_t maxByt
     [t removeObjectsForKeys:drop];
   }
 
+  if (group) {
+    for (KidoMetalBufferSlot *slot in [self.drainingBuffers allObjects]) {
+      if (slot.clientId == clientId) {
+        [self attachReleaseGroup:group toBufferSlot:slot];
+      }
+    }
+  }
+
   NSMutableArray<NSNumber *> *dropBufs = [NSMutableArray array];
   for (NSNumber *k in self.buffers) {
     KidoMetalBufferSlot *slot = self.buffers[k];
     if (slot.clientId == clientId) {
       slot.destroyed = YES;
       [dropBufs addObject:k];
+      [self attachReleaseGroup:group toBufferSlot:slot];
       [self maybeReleaseBufferSlot:slot];
     }
   }
   [self.buffers removeObjectsForKeys:dropBufs];
+}
+
+- (void)closeClient:(uint32_t)clientId {
+  [self closeClient:clientId group:nil];
 }
 
 - (void)beginStopOnDeviceQueue {
@@ -584,9 +647,22 @@ static NSData *_Nullable encodeFunctionNames(id<MTLLibrary> lib, uint32_t maxByt
         munmap(slot.hostPtr, (size_t)slot.alignedLen);
         slot.hostPtr = NULL;
       }
+      [self signalBufferReleaseGroups:slot];
     }
   }
   [self.buffers removeAllObjects];
+  for (KidoMetalBufferSlot *slot in [self.drainingBuffers allObjects]) {
+    if (slot.inFlightRefs == 0 && !slot.unmapping) {
+      slot.unmapping = YES;
+      slot.mtlBuffer = nil;
+      if (slot.hostPtr) {
+        munmap(slot.hostPtr, (size_t)slot.alignedLen);
+        slot.hostPtr = NULL;
+      }
+      [self signalBufferReleaseGroups:slot];
+      [self.drainingBuffers removeObject:slot];
+    }
+  }
 }
 
 - (void)shutdown {
@@ -605,9 +681,22 @@ static NSData *_Nullable encodeFunctionNames(id<MTLLibrary> lib, uint32_t maxByt
           munmap(slot.hostPtr, (size_t)slot.alignedLen);
           slot.hostPtr = NULL;
         }
+        [self signalBufferReleaseGroups:slot];
       }
     }
     [self.buffers removeAllObjects];
+    for (KidoMetalBufferSlot *slot in [self.drainingBuffers allObjects]) {
+      if (slot.inFlightRefs == 0 && !slot.unmapping) {
+        slot.unmapping = YES;
+        slot.mtlBuffer = nil;
+        if (slot.hostPtr) {
+          munmap(slot.hostPtr, (size_t)slot.alignedLen);
+          slot.hostPtr = NULL;
+        }
+      }
+      [self signalBufferReleaseGroups:slot];
+    }
+    [self.drainingBuffers removeAllObjects];
   });
 }
 
@@ -745,10 +834,23 @@ static NSData *_Nullable encodeFunctionNames(id<MTLLibrary> lib, uint32_t maxByt
   }
 
   case KMTL_OP_CLIENT_CLOSE: {
-    [self closeClient:req.client_id];
-    struct kmtl_resp_hdr resp = {0};
-    resp.status = KMTL_OK;
-    replyElemNow(elem, resp, NULL, 0);
+    dispatch_group_t closeGroup = dispatch_group_create();
+    KidoMetalClientState *cs = self.clients[@(req.client_id)];
+    uint64_t sessionToken = cs ? cs.sessionToken : 0;
+    [self closeClient:req.client_id group:closeGroup];
+    if (dispatch_group_wait(closeGroup, DISPATCH_TIME_NOW) == 0) {
+      struct kmtl_resp_hdr resp = {0};
+      resp.status = KMTL_OK;
+      replyElemNow(elem, resp, NULL, 0);
+    } else {
+      KidoMetalPendingElem *pe =
+          [self trackPendingElem:elem clientId:req.client_id sessionToken:sessionToken];
+      dispatch_group_notify(closeGroup, self.deviceQueue, ^{
+        struct kmtl_resp_hdr resp = {0};
+        resp.status = KMTL_OK;
+        [self completePendingElem:pe resp:resp extra:NULL extraLen:0];
+      });
+    }
     return;
   }
 
@@ -951,6 +1053,8 @@ static NSData *_Nullable encodeFunctionNames(id<MTLLibrary> lib, uint32_t maxByt
 
   self.usedBytes += alignedLen;
   cs.pendingBuffers++;
+  dispatch_group_t mapsGroup = cs.pendingMapsGroup;
+  dispatch_group_enter(mapsGroup);
   uint64_t sessionToken = cs.sessionToken;
   uint64_t gen = self.deviceGeneration;
   KidoMetalPendingElem *pe = [self trackPendingElem:elem clientId:req.client_id sessionToken:sessionToken];
@@ -973,18 +1077,21 @@ static NSData *_Nullable encodeFunctionNames(id<MTLLibrary> lib, uint32_t maxByt
                                       kido_vmm_logf("virtio-metal: rollback unmap failed at 0x%llx: %s",
                                                     (unsigned long long)shmOffset,
                                                     uerr.localizedDescription.UTF8String);
+                                      dispatch_group_leave(mapsGroup);
                                       return;
                                     }
                                     munmap(ptr, (size_t)alignedLen);
                                     if (self.usedBytes >= alignedLen) self.usedBytes -= alignedLen;
                                     else self.usedBytes = 0;
                                     kmtl_shm_free(&self->_shmAlloc, shmOffset, alignedLen);
+                                    dispatch_group_leave(mapsGroup);
                                   }];
               } else {
                 munmap(ptr, (size_t)alignedLen);
                 if (self.usedBytes >= alignedLen) self.usedBytes -= alignedLen;
                 else self.usedBytes = 0;
                 kmtl_shm_free(&self->_shmAlloc, shmOffset, alignedLen);
+                dispatch_group_leave(mapsGroup);
               }
               [self failPendingElem:pe
                              status:KMTL_ERR_IO
@@ -1001,6 +1108,7 @@ static NSData *_Nullable encodeFunctionNames(id<MTLLibrary> lib, uint32_t maxByt
             slot.mtlBuffer = mbBlock;
             mbBlock = nil;
             self.buffers[@(handle)] = slot;
+            dispatch_group_leave(mapsGroup);
 
             struct kmtl_resp_hdr resp = {0};
             resp.status = KMTL_OK;

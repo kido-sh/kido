@@ -50,6 +50,12 @@ extern char **environ;
 #define KMTL_MAX_INFLIGHT_CMDS 4u
 #define KMTL_MAX_TOUCHED_BUFS 256u
 #define KMTL_MAX_USED_PSOS 256u
+#define KMTL_CHUNK_MAX_DISPATCHES 256u
+#define KMTL_CHUNK_MAX_DISPATCHES_SMALL 64u
+#define KMTL_CHUNK_MAX_WORKGROUPS 262144ULL
+#define KMTL_CHUNK_MAX_WORKGROUPS_SMALL 32768ULL
+#define KMTL_CHUNK_MAX_DESC_SETS 512u
+#define KMTL_INDIRECT_WG_ESTIMATE 1024ULL
 #define KMTL_STAGING_BYTES (4u * 1024u * 1024u)
 #define KMTL_STAGING_FALLBACK_BYTES (1u * 1024u * 1024u)
 #define KMTL_DARWIN_PAGE_SIZE 16384u
@@ -83,6 +89,7 @@ typedef struct {
   bool is_dmabuf;
   bool is_host_ptr;
   bool flush_deferred;
+  bool gpu_dirty;
   int dmabuf_fd;
   uint32_t inflight_refs;
   uint32_t inflight_write_refs;
@@ -144,6 +151,7 @@ typedef struct {
   uint32_t binding_mask;
   uint32_t readonly_mask;
   uint32_t max_tg;
+  bool is_binary;
   vk_func_const_t *consts;
   uint32_t num_consts;
   vk_pso_spec_t specs[KMTL_MAX_PSO_SPECS];
@@ -246,6 +254,7 @@ typedef struct {
   uint32_t slot_tail;
   uint32_t slots_in_flight;
   uint32_t deferred_flush_count;
+  uint32_t gpu_dirty_count;
 
   VkBuffer staging_buf;
   VkDeviceMemory staging_mem;
@@ -257,6 +266,8 @@ typedef struct {
   VkPhysicalDeviceMemoryProperties mem_props;
   uint32_t subgroup_size;
   uint32_t subgroup_ops;
+  uint32_t max_chunk_dispatches;
+  uint64_t max_chunk_workgroups;
   uint64_t buf_extra_pad;
   uint64_t host_ptr_align;
   bool has_dmabuf_ext;
@@ -278,12 +289,14 @@ typedef struct {
   bool dma_coherent;
   bool vmm_dma_coherent;
   bool has_fp16;
+  bool has_bf16;
   bool has_int16;
   bool has_int8;
   bool has_storage_16bit;
   bool has_storage_8bit;
   bool has_int64;
   bool logged_buf_mode;
+  bool logged_dmabuf_fallback;
   PFN_vkGetMemoryFdPropertiesKHR pfn_get_mem_fd_props;
   PFN_vkGetMemoryHostPointerPropertiesEXT pfn_get_mem_host_ptr_props;
 
@@ -483,6 +496,7 @@ static bool vk_init(worker_t *w) {
   bool has_ext_host_ptr = false;
   bool has_ext_pci = false;
   bool has_ext_drm = false;
+  bool has_ext_bf16 = false;
   if (exts && ext_count > 0) {
     vkEnumerateDeviceExtensionProperties(w->phys_dev, NULL, &ext_count, exts);
     for (uint32_t i = 0; i < ext_count; i++) {
@@ -491,9 +505,13 @@ static bool vk_init(worker_t *w) {
       if (strcmp(exts[i].extensionName, VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME) == 0) has_ext_host_ptr = true;
       if (strcmp(exts[i].extensionName, VK_EXT_PCI_BUS_INFO_EXTENSION_NAME) == 0) has_ext_pci = true;
       if (strcmp(exts[i].extensionName, VK_EXT_PHYSICAL_DEVICE_DRM_EXTENSION_NAME) == 0) has_ext_drm = true;
+#ifdef VK_KHR_SHADER_BFLOAT16_EXTENSION_NAME
+      if (strcmp(exts[i].extensionName, VK_KHR_SHADER_BFLOAT16_EXTENSION_NAME) == 0) has_ext_bf16 = true;
+#endif
     }
   }
   free(exts);
+  (void)has_ext_bf16;
 
   VkPhysicalDeviceSubgroupProperties sg_props = {
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES,
@@ -561,8 +579,16 @@ static bool vk_init(worker_t *w) {
     }
   }
 
+#ifdef VK_KHR_SHADER_BFLOAT16_EXTENSION_NAME
+  VkPhysicalDeviceShaderBfloat16FeaturesKHR bf16_avail = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_BFLOAT16_FEATURES_KHR,
+  };
+#endif
   VkPhysicalDeviceVulkan12Features feat12_avail = {
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
+#ifdef VK_KHR_SHADER_BFLOAT16_EXTENSION_NAME
+      .pNext = has_ext_bf16 ? &bf16_avail : NULL,
+#endif
   };
   VkPhysicalDeviceVulkan11Features feat11_avail = {
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
@@ -586,8 +612,22 @@ static bool vk_init(worker_t *w) {
     w->has_host_ptr_ext = true;
   }
 
+#ifdef VK_KHR_SHADER_BFLOAT16_EXTENSION_NAME
+  VkPhysicalDeviceShaderBfloat16FeaturesKHR bf16_en = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_BFLOAT16_FEATURES_KHR,
+  };
+  if (has_ext_bf16 && bf16_avail.shaderBFloat16Type) {
+    enabled_exts[enabled_ext_count++] = VK_KHR_SHADER_BFLOAT16_EXTENSION_NAME;
+    bf16_en.shaderBFloat16Type = VK_TRUE;
+    w->has_bf16 = true;
+  }
+#endif
+
   VkPhysicalDeviceVulkan12Features feat12_en = {
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
+#ifdef VK_KHR_SHADER_BFLOAT16_EXTENSION_NAME
+      .pNext = w->has_bf16 ? &bf16_en : NULL,
+#endif
       .shaderFloat16 = feat12_avail.shaderFloat16,
       .shaderInt8 = feat12_avail.shaderInt8,
       .storageBuffer8BitAccess = feat12_avail.storageBuffer8BitAccess,
@@ -773,12 +813,19 @@ static bool vk_init(worker_t *w) {
     return false;
   }
 
+  /* Broadcom V3DV (vendorID 0x14e4) and small-workgroup GPUs hit per-CB memory or
+     DRM job-timeout limits earlier than desktop/mid-range GPUs; split chunks more tightly. */
+  bool small_gpu = (w->props.vendorID == 0x14e4u) ||
+                   (w->props.limits.maxComputeWorkGroupInvocations <= 256u);
+  w->max_chunk_dispatches = small_gpu ? KMTL_CHUNK_MAX_DISPATCHES_SMALL : KMTL_CHUNK_MAX_DISPATCHES;
+  w->max_chunk_workgroups = small_gpu ? KMTL_CHUNK_MAX_WORKGROUPS_SMALL : KMTL_CHUNK_MAX_WORKGROUPS;
+
   const char *tier_name = (w->buf_tier == KMTL_BUF_TIER_DMABUF)     ? "dmabuf"
                           : (w->buf_tier == KMTL_BUF_TIER_HOST_PTR) ? "host_ptr"
                                                                     : "staging";
   fprintf(stderr,
-          "kido-vk-worker: GPU=%s (subgroup=%u fp16=%d tier=%s dma_coherent=%d vmm_coherent=%d timestamps=%d slots=%u pad=%llu)\n",
-          w->props.deviceName, w->subgroup_size, w->has_fp16 ? 1 : 0, tier_name,
+          "kido-vk-worker: GPU=%s (subgroup=%u fp16=%d bf16=%d tier=%s dma_coherent=%d vmm_coherent=%d timestamps=%d slots=%u pad=%llu)\n",
+          w->props.deviceName, w->subgroup_size, w->has_fp16 ? 1 : 0, w->has_bf16 ? 1 : 0, tier_name,
           w->dma_coherent ? 1 : 0, w->vmm_dma_coherent ? 1 : 0, w->has_timestamps ? 1 : 0,
           KMTL_MAX_INFLIGHT_CMDS, (unsigned long long)w->buf_extra_pad);
   return true;
@@ -822,6 +869,10 @@ static void destroy_buffer_slot_now(worker_t *w, vk_buffer_t *b) {
   if (b->flush_deferred) {
     b->flush_deferred = false;
     if (w->deferred_flush_count > 0) w->deferred_flush_count--;
+  }
+  if (b->gpu_dirty) {
+    b->gpu_dirty = false;
+    if (w->gpu_dirty_count > 0) w->gpu_dirty_count--;
   }
   if (b->mapped && b->memory) {
     vkUnmapMemory(w->device, b->memory);
@@ -954,6 +1005,7 @@ static bool reset_all(worker_t *w) {
     w->slot_tail = 0;
     w->slots_in_flight = 0;
     w->deferred_flush_count = 0;
+    w->gpu_dirty_count = 0;
   }
   for (size_t i = 0; i < KMTL_MAX_CLIENTS; i++) {
     if (w->clients[i].active) close_client(w, w->clients[i].client_id, true);
@@ -1058,7 +1110,16 @@ static bool try_alloc_dmabuf_vk_buffer(worker_t *w,
       .size = shm_len,
   };
   int dfd = ioctl(w->udmabuf_fd, UDMABUF_CREATE, &uc);
-  if (dfd < 0) return false;
+  if (dfd < 0) {
+    if (!w->logged_dmabuf_fallback) {
+      w->logged_dmabuf_fallback = true;
+      fprintf(stderr,
+              "kido-vk-worker: WARNING: UDMABUF_CREATE failed for %llu MiB buffer (%s); "
+              "falling back to staging copies (check /sys/module/udmabuf/parameters/size_limit_mb)\n",
+              (unsigned long long)(shm_len >> 20), strerror(errno));
+    }
+    return false;
+  }
 
   VkExternalMemoryBufferCreateInfo ext_bci = {
       .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO,
@@ -2390,8 +2451,10 @@ static bool retire_oldest_slot(worker_t *w, bool *out_had_deferred_flush) {
         if (b->is_dmabuf || b->is_host_ptr) {
           if (!w->dma_coherent) {
 #if defined(__aarch64__)
-            if (w->shm_base) {
-              arm64_flush_poc_parallel(w, w->shm_base + b->shm_offset, (size_t)b->aligned_len, true);
+            /* Defer GPU->CPU PoC invalidation until client sync point (WAIT_COMPLETED / WAIT_QUEUE). */
+            if (!b->gpu_dirty) {
+              b->gpu_dirty = true;
+              w->gpu_dirty_count++;
             }
 #endif
           }
@@ -2488,6 +2551,116 @@ static bool retire_up_to_queue_seq(worker_t *w, vk_queue_t *q, uint64_t target_s
   return true;
 }
 
+static bool flush_gpu_dirty_buffers(worker_t *w, uint32_t cid) {
+#if defined(__aarch64__)
+  if (w->dma_coherent || w->gpu_dirty_count == 0 || !w->shm_base) return true;
+  /* If any gpu_dirty buffer for cid also has a newer in-flight GPU write, drain first to avoid racing DMA. */
+  bool need_drain = false;
+  for (size_t i = 0; i < w->buffers_cap; i++) {
+    vk_buffer_t *b = &w->buffers[i];
+    if (b->active && b->gpu_dirty && b->inflight_write_refs > 0 && (cid == 0 || b->client_id == cid)) {
+      need_drain = true;
+      break;
+    }
+  }
+  if (need_drain && !drain_all_inflight(w)) return false;
+  for (size_t i = 0; i < w->buffers_cap; i++) {
+    vk_buffer_t *b = &w->buffers[i];
+    if (!b->active || !b->gpu_dirty) continue;
+    if (cid != 0 && b->client_id != cid) continue;
+    b->gpu_dirty = false;
+    if (w->gpu_dirty_count > 0) w->gpu_dirty_count--;
+    if (!b->pending_destroy && (b->is_dmabuf || b->is_host_ptr)) {
+      arm64_flush_poc_parallel(w, w->shm_base + b->shm_offset, (size_t)b->aligned_len, true);
+    }
+  }
+#else
+  (void)w;
+  (void)cid;
+#endif
+  return true;
+}
+
+static bool repack_active_set_bytes(worker_t *w,
+                                    vk_cmd_slot_t *slot,
+                                    const bool *bound_is_bytes,
+                                    const uint8_t **bound_bytes_src,
+                                    uint64_t *bound_bytes_off,
+                                    const uint32_t *bound_bytes_len,
+                                    uint64_t *staging_cursor) {
+  *staging_cursor = 0;
+  for (uint32_t s = 0; s < KMTL_MAX_BUFFER_SLOTS; s++) {
+    if (!bound_is_bytes[s]) continue;
+    uint64_t off = align_up(*staging_cursor, w->staging_align);
+    uint64_t end = off + bound_bytes_len[s];
+    if (end > w->slot_staging_bytes) return false;
+    memcpy(w->staging_ptr + slot->staging_base + off, bound_bytes_src[s], bound_bytes_len[s]);
+    *staging_cursor = end;
+    bound_bytes_off[s] = slot->staging_base + off;
+  }
+  return true;
+}
+
+static bool flush_commit_chunk(worker_t *w,
+                               vk_cmd_slot_t *slot,
+                               VkPipeline *deferred_pipes,
+                               size_t *n_deferred_pipes,
+                               bool *bound_is_bytes,
+                               const uint8_t **bound_bytes_src,
+                               uint64_t *bound_bytes_off,
+                               const uint32_t *bound_bytes_len,
+                               uint64_t *staging_cursor,
+                               uint32_t *chunk_dispatches,
+                               uint32_t *chunk_desc_sets,
+                               uint64_t *chunk_workgroups,
+                               bool *any_gpu_cmd,
+                               bool *did_intermediate_flush,
+                               uint64_t *first_submit_ns,
+                               bool *use_ts,
+                               bool *submitted_pending) {
+  VkCommandBuffer cmd_buf = slot->cmd_buf;
+  if (vkEndCommandBuffer(cmd_buf) != VK_SUCCESS) return false;
+  if (!*did_intermediate_flush) *first_submit_ns = monotonic_ns();
+  vkResetFences(w->device, 1, &slot->fence);
+  VkSubmitInfo si = {
+      .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+      .commandBufferCount = 1,
+      .pCommandBuffers = &cmd_buf,
+  };
+  if (vkQueueSubmit(w->queue, 1, &si, slot->fence) != VK_SUCCESS) return false;
+  *submitted_pending = true;
+  if (vkWaitForFences(w->device, 1, &slot->fence, VK_TRUE, 30000000000ULL) != VK_SUCCESS) return false;
+  *submitted_pending = false;
+
+  /* Retire any earlier FIFO slots that completed ahead of this chunk before freeing deferred pipes. */
+  if (w->slots_in_flight > 0 && !poll_retire_completed(w)) return false;
+
+  if (w->slots_in_flight == 0 && *n_deferred_pipes > 0) {
+    for (size_t i = 0; i < *n_deferred_pipes; i++) {
+      vkDestroyPipeline(w->device, deferred_pipes[i], NULL);
+    }
+    *n_deferred_pipes = 0;
+  }
+
+  vkResetDescriptorPool(w->device, slot->desc_pool, 0);
+  vkResetCommandBuffer(cmd_buf, 0);
+  VkCommandBufferBeginInfo cbbi = {
+      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+      .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+  };
+  if (vkBeginCommandBuffer(cmd_buf, &cbbi) != VK_SUCCESS) return false;
+
+  *chunk_dispatches = 0;
+  *chunk_desc_sets = 0;
+  *chunk_workgroups = 0;
+  *any_gpu_cmd = false;
+  *did_intermediate_flush = true;
+  *use_ts = false;
+
+  return repack_active_set_bytes(w, slot, bound_is_bytes, bound_bytes_src, bound_bytes_off,
+                                 bound_bytes_len, staging_cursor);
+}
+
 static bool handle_commit(worker_t *w,
                           const struct kmtl_req_hdr *req,
                           const uint8_t *stream,
@@ -2520,34 +2693,11 @@ static bool handle_commit(worker_t *w,
     }
   }
 
-  vk_cmd_slot_t *slot = &w->slots[w->slot_tail];
-  VkCommandBuffer cmd_buf = slot->cmd_buf;
-  VkDescriptorPool desc_pool = slot->desc_pool;
-  uint64_t staging_base = slot->staging_base;
-
-  vkResetDescriptorPool(w->device, desc_pool, 0);
-  vkResetCommandBuffer(cmd_buf, 0);
-  VkCommandBufferBeginInfo cbbi = {
-      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-      .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-  };
-  if (vkBeginCommandBuffer(cmd_buf, &cbbi) != VK_SUCCESS) {
-    return send_err(w->sock_fd, KMTL_ERR_GPU, "vkBeginCommandBuffer failed", out_cap);
-  }
-
-  bool use_ts = w->has_timestamps && slot->query_pool != VK_NULL_HANDLE;
-  if (use_ts) {
-    vkCmdResetQueryPool(cmd_buf, slot->query_pool, 0, 2);
-    vkCmdWriteTimestamp(cmd_buf, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, slot->query_pool, 0);
-  }
-
   size_t touched_idx[KMTL_MAX_TOUCHED_BUFS];
   bool touched_written[KMTL_MAX_TOUCHED_BUFS];
   size_t n_touched = 0;
   size_t used_pso_idx[KMTL_MAX_USED_PSOS];
   size_t n_used_psos = 0;
-  VkPipeline deferred_pipes[KMTL_MAX_DEFERRED_PIPES];
-  size_t n_deferred_pipes = 0;
 
   bool bad = false;
   const char *bad_reason = "invalid command stream";
@@ -2589,435 +2739,283 @@ static bool handle_commit(worker_t *w,
       }                                                                     \
     } while (0)
 
-  bool in_comp = false, in_blit = false;
-  ptrdiff_t cur_pso_idx = -1;
-  ptrdiff_t bound_buf_idx[KMTL_MAX_BUFFER_SLOTS];
-  for (uint32_t s = 0; s < KMTL_MAX_BUFFER_SLOTS; s++) bound_buf_idx[s] = -1;
-  uint64_t bound_off[KMTL_MAX_BUFFER_SLOTS] = {0};
-  bool bound_is_bytes[KMTL_MAX_BUFFER_SLOTS] = {false};
-  uint64_t bound_bytes_off[KMTL_MAX_BUFFER_SLOTS] = {0};
-  uint32_t bound_bytes_len[KMTL_MAX_BUFFER_SLOTS] = {0};
-  uint32_t tg_mem_lengths[KMTL_MAX_BUFFER_SLOTS] = {0};
-  uint64_t staging_cursor = 0;
+  /* Phase 1: Validate full stream and collect touched buffers/pipelines with zero GPU side effects. */
+  {
+    bool in_comp = false, in_blit = false;
+    ptrdiff_t cur_pso_idx = -1;
+    ptrdiff_t bound_buf_idx[KMTL_MAX_BUFFER_SLOTS];
+    for (uint32_t s = 0; s < KMTL_MAX_BUFFER_SLOTS; s++) bound_buf_idx[s] = -1;
+    uint64_t bound_off[KMTL_MAX_BUFFER_SLOTS] = {0};
+    bool bound_is_bytes[KMTL_MAX_BUFFER_SLOTS] = {false};
+    uint32_t bound_bytes_len[KMTL_MAX_BUFFER_SLOTS] = {0};
+    uint32_t tg_mem_lengths[KMTL_MAX_BUFFER_SLOTS] = {0};
+    size_t pos = 0;
 
-  size_t pos = 0;
-  bool any_gpu_cmd = false;
+    while (pos < stream_len && !bad) {
+      if (stream_len - pos < sizeof(struct kmtl_cmd_hdr)) { bad = true; break; }
+      struct kmtl_cmd_hdr hdr;
+      memcpy(&hdr, stream + pos, sizeof(hdr));
+      if (hdr.size < sizeof(hdr) || (hdr.size & 7u) != 0 || hdr.size > stream_len - pos) {
+        bad = true;
+        break;
+      }
+      const uint8_t *rec = stream + pos;
+      pos += hdr.size;
 
-  while (pos < stream_len && !bad) {
-    if (stream_len - pos < sizeof(struct kmtl_cmd_hdr)) {
-      bad = true;
-      break;
-    }
-    struct kmtl_cmd_hdr hdr;
-    memcpy(&hdr, stream + pos, sizeof(hdr));
-    if (hdr.size < sizeof(hdr) || (hdr.size & 7u) != 0 || hdr.size > stream_len - pos) {
-      bad = true;
-      break;
-    }
-    const uint8_t *rec = stream + pos;
-    pos += hdr.size;
+      switch (hdr.op) {
+      case KMTL_CMD_BEGIN_COMPUTE:
+        if (in_comp || in_blit) { bad = true; break; }
+        in_comp = true;
+        cur_pso_idx = -1;
+        for (uint32_t s = 0; s < KMTL_MAX_BUFFER_SLOTS; s++) bound_buf_idx[s] = -1;
+        memset(bound_off, 0, sizeof(bound_off));
+        memset(bound_is_bytes, 0, sizeof(bound_is_bytes));
+        memset(bound_bytes_len, 0, sizeof(bound_bytes_len));
+        memset(tg_mem_lengths, 0, sizeof(tg_mem_lengths));
+        break;
 
-    switch (hdr.op) {
-    case KMTL_CMD_BEGIN_COMPUTE:
-      if (in_comp || in_blit) { bad = true; break; }
-      in_comp = true;
-      cur_pso_idx = -1;
-      for (uint32_t s = 0; s < KMTL_MAX_BUFFER_SLOTS; s++) bound_buf_idx[s] = -1;
-      memset(bound_off, 0, sizeof(bound_off));
-      memset(bound_is_bytes, 0, sizeof(bound_is_bytes));
-      memset(tg_mem_lengths, 0, sizeof(tg_mem_lengths));
-      if (any_gpu_cmd || w->slots_in_flight > 0) emit_full_barrier(cmd_buf);
-      break;
+      case KMTL_CMD_BEGIN_BLIT:
+        if (in_comp || in_blit) { bad = true; break; }
+        in_blit = true;
+        break;
 
-    case KMTL_CMD_BEGIN_BLIT:
-      if (in_comp || in_blit) { bad = true; break; }
-      in_blit = true;
-      if (any_gpu_cmd || w->slots_in_flight > 0) emit_full_barrier(cmd_buf);
-      break;
+      case KMTL_CMD_END_ENCODER:
+        in_comp = false;
+        in_blit = false;
+        cur_pso_idx = -1;
+        break;
 
-    case KMTL_CMD_END_ENCODER:
-      in_comp = false;
-      in_blit = false;
-      cur_pso_idx = -1;
-      break;
+      case KMTL_CMD_SET_PIPELINE: {
+        if (!in_comp || hdr.size < sizeof(struct kmtl_cmd_set_pipeline)) { bad = true; break; }
+        struct kmtl_cmd_set_pipeline c;
+        memcpy(&c, rec, sizeof(c));
+        ptrdiff_t pidx = find_pipeline_idx(w, c.pso_handle, req->client_id);
+        if (pidx < 0) { bad = true; bad_reason = "unknown pipeline handle"; break; }
+        cur_pso_idx = pidx;
+        break;
+      }
 
-    case KMTL_CMD_SET_PIPELINE: {
-      if (!in_comp || hdr.size < sizeof(struct kmtl_cmd_set_pipeline)) { bad = true; break; }
-      struct kmtl_cmd_set_pipeline c;
-      memcpy(&c, rec, sizeof(c));
-      ptrdiff_t pidx = find_pipeline_idx(w, c.pso_handle, req->client_id);
-      if (pidx < 0) { bad = true; bad_reason = "unknown pipeline handle"; break; }
-      cur_pso_idx = pidx;
-      break;
-    }
+      case KMTL_CMD_SET_BUFFER: {
+        if (!in_comp || hdr.size < sizeof(struct kmtl_cmd_set_buffer)) { bad = true; break; }
+        struct kmtl_cmd_set_buffer c;
+        memcpy(&c, rec, sizeof(c));
+        if (c.index >= KMTL_MAX_BUFFER_SLOTS) { bad = true; break; }
+        bound_is_bytes[c.index] = false;
+        bound_bytes_len[c.index] = 0;
+        if (c.buf_handle == 0) {
+          bound_buf_idx[c.index] = -1;
+          bound_off[c.index] = 0;
+        } else {
+          ptrdiff_t bidx = find_buffer_idx(w, c.buf_handle, req->client_id);
+          if (bidx < 0 || c.offset >= w->buffers[bidx].aligned_len) {
+            bad = true;
+            bad_reason = "invalid buffer offset";
+            break;
+          }
+          bound_buf_idx[c.index] = bidx;
+          bound_off[c.index] = c.offset;
+        }
+        break;
+      }
 
-    case KMTL_CMD_SET_BUFFER: {
-      if (!in_comp || hdr.size < sizeof(struct kmtl_cmd_set_buffer)) { bad = true; break; }
-      struct kmtl_cmd_set_buffer c;
-      memcpy(&c, rec, sizeof(c));
-      if (c.index >= KMTL_MAX_BUFFER_SLOTS) { bad = true; break; }
-      bound_is_bytes[c.index] = false;
-      if (c.buf_handle == 0) {
-        bound_buf_idx[c.index] = -1;
-        bound_off[c.index] = 0;
-      } else {
-        ptrdiff_t bidx = find_buffer_idx(w, c.buf_handle, req->client_id);
-        if (bidx < 0 || c.offset >= w->buffers[bidx].aligned_len || (c.offset % w->staging_align) != 0) {
+      case KMTL_CMD_SET_BUFFER_OFFSET: {
+        if (!in_comp || hdr.size < sizeof(struct kmtl_cmd_set_buffer_offset)) { bad = true; break; }
+        struct kmtl_cmd_set_buffer_offset c;
+        memcpy(&c, rec, sizeof(c));
+        if (c.index >= KMTL_MAX_BUFFER_SLOTS || bound_buf_idx[c.index] < 0 ||
+            c.offset >= w->buffers[bound_buf_idx[c.index]].aligned_len) {
           bad = true;
-          bad_reason = "invalid or unaligned buffer offset";
+          bad_reason = "invalid buffer offset";
           break;
         }
-        bound_buf_idx[c.index] = bidx;
         bound_off[c.index] = c.offset;
-      }
-      break;
-    }
-
-    case KMTL_CMD_SET_BUFFER_OFFSET: {
-      if (!in_comp || hdr.size < sizeof(struct kmtl_cmd_set_buffer_offset)) { bad = true; break; }
-      struct kmtl_cmd_set_buffer_offset c;
-      memcpy(&c, rec, sizeof(c));
-      if (c.index >= KMTL_MAX_BUFFER_SLOTS || bound_buf_idx[c.index] < 0 ||
-          c.offset >= w->buffers[bound_buf_idx[c.index]].aligned_len || (c.offset % w->staging_align) != 0) {
-        bad = true;
-        bad_reason = "invalid or unaligned buffer offset";
-        break;
-      }
-      bound_off[c.index] = c.offset;
-      break;
-    }
-
-    case KMTL_CMD_SET_BYTES: {
-      if (!in_comp || hdr.size < sizeof(struct kmtl_cmd_set_bytes)) { bad = true; break; }
-      struct kmtl_cmd_set_bytes c;
-      memcpy(&c, rec, sizeof(c));
-      if (c.index >= KMTL_MAX_BUFFER_SLOTS || c.length == 0 || c.length > KMTL_MAX_SET_BYTES ||
-          sizeof(c) + c.length > hdr.size) {
-        bad = true;
-        break;
-      }
-      uint64_t off = align_up(staging_cursor, w->staging_align);
-      uint64_t end = off + c.length;
-      if (end > w->slot_staging_bytes) {
-        bad = true;
-        bad_reason = "staging buffer exhausted for setBytes";
-        break;
-      }
-      memcpy(w->staging_ptr + staging_base + off, rec + sizeof(c), c.length);
-      staging_cursor = end;
-      bound_buf_idx[c.index] = -1;
-      bound_is_bytes[c.index] = true;
-      bound_bytes_off[c.index] = staging_base + off;
-      bound_bytes_len[c.index] = c.length;
-      break;
-    }
-
-    case KMTL_CMD_SET_TG_MEM: {
-      if (!in_comp || hdr.size < sizeof(struct kmtl_cmd_set_tg_mem)) { bad = true; break; }
-      struct kmtl_cmd_set_tg_mem c;
-      memcpy(&c, rec, sizeof(c));
-      if (c.index >= KMTL_MAX_BUFFER_SLOTS || (c.length & 15u) != 0 ||
-          c.length > w->props.limits.maxComputeSharedMemorySize) {
-        bad = true;
-        break;
-      }
-      uint64_t total_tg = 0;
-      for (uint32_t ti = 0; ti < KMTL_MAX_BUFFER_SLOTS; ti++) {
-        total_tg += (ti == c.index) ? c.length : tg_mem_lengths[ti];
-      }
-      if (total_tg > w->props.limits.maxComputeSharedMemorySize) {
-        bad = true;
-        break;
-      }
-      tg_mem_lengths[c.index] = c.length;
-      break;
-    }
-
-    case KMTL_CMD_DISPATCH_THREADGROUPS:
-    case KMTL_CMD_DISPATCH_THREADS: {
-      if (!in_comp || cur_pso_idx < 0 || hdr.size < sizeof(struct kmtl_cmd_dispatch)) { bad = true; break; }
-      vk_pipeline_t *cur_pso = &w->pipelines[cur_pso_idx];
-      struct kmtl_cmd_dispatch c;
-      memcpy(&c, rec, sizeof(c));
-      if (c.gx == 0 || c.gy == 0 || c.gz == 0 ||
-          c.gx > UINT32_MAX || c.gy > UINT32_MAX || c.gz > UINT32_MAX ||
-          !validate_tg_dims(w, cur_pso, c.tx, c.ty, c.tz)) {
-        bad = true;
-        bad_reason = "invalid dispatch dimensions";
-        break;
-      }
-      uint64_t ngx = c.gx, ngy = c.gy, ngz = c.gz;
-      if (hdr.op == KMTL_CMD_DISPATCH_THREADS) {
-        ngx = (c.gx + c.tx - 1) / c.tx;
-        ngy = (c.gy + c.ty - 1) / c.ty;
-        ngz = (c.gz + c.tz - 1) / c.tz;
-      }
-      if (ngx > w->props.limits.maxComputeWorkGroupCount[0] ||
-          ngy > w->props.limits.maxComputeWorkGroupCount[1] ||
-          ngz > w->props.limits.maxComputeWorkGroupCount[2]) {
-        bad = true;
-        bad_reason = "dispatch workgroup count exceeds device limits";
-        break;
-      }
-      TOUCH_PSO_IDX((size_t)cur_pso_idx);
-      if (bad) break;
-      VkPipeline pipe = get_or_create_vk_pipeline(w, cur_pso, (uint32_t)c.tx, (uint32_t)c.ty, (uint32_t)c.tz,
-                                                  deferred_pipes, &n_deferred_pipes);
-      if (!pipe) {
-        bad = true;
-        bad_reason = "vkCreateComputePipelines failed";
         break;
       }
 
-      if (cur_pso->binding_mask != 0) {
-        VkDescriptorSetAllocateInfo dsai = {
-            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-            .descriptorPool = desc_pool,
-            .descriptorSetCount = 1,
-            .pSetLayouts = &cur_pso->ds_layout,
-        };
-        VkDescriptorSet dset = VK_NULL_HANDLE;
-        if (vkAllocateDescriptorSets(w->device, &dsai, &dset) != VK_SUCCESS) {
+      case KMTL_CMD_SET_BYTES: {
+        if (!in_comp || hdr.size < sizeof(struct kmtl_cmd_set_bytes)) { bad = true; break; }
+        struct kmtl_cmd_set_bytes c;
+        memcpy(&c, rec, sizeof(c));
+        if (c.index >= KMTL_MAX_BUFFER_SLOTS || c.length == 0 || c.length > KMTL_MAX_SET_BYTES ||
+            sizeof(c) + c.length > hdr.size) {
           bad = true;
-          bad_reason = "vkAllocateDescriptorSets failed";
           break;
         }
-        VkDescriptorBufferInfo dbis[KMTL_MAX_BUFFER_SLOTS];
-        VkWriteDescriptorSet writes[KMTL_MAX_BUFFER_SLOTS];
-        uint32_t nw = 0;
+        bound_buf_idx[c.index] = -1;
+        bound_is_bytes[c.index] = true;
+        bound_bytes_len[c.index] = c.length;
+        uint64_t active_stage = 0;
+        for (uint32_t s = 0; s < KMTL_MAX_BUFFER_SLOTS; s++) {
+          if (!bound_is_bytes[s]) continue;
+          active_stage = align_up(active_stage, w->staging_align) + bound_bytes_len[s];
+        }
+        if (active_stage > w->slot_staging_bytes) {
+          bad = true;
+          bad_reason = "staging buffer exhausted for setBytes";
+        }
+        break;
+      }
+
+      case KMTL_CMD_SET_TG_MEM: {
+        if (!in_comp || hdr.size < sizeof(struct kmtl_cmd_set_tg_mem)) { bad = true; break; }
+        struct kmtl_cmd_set_tg_mem c;
+        memcpy(&c, rec, sizeof(c));
+        if (c.index >= KMTL_MAX_BUFFER_SLOTS || (c.length & 15u) != 0 ||
+            c.length > w->props.limits.maxComputeSharedMemorySize) {
+          bad = true;
+          break;
+        }
+        uint64_t total_tg = 0;
+        for (uint32_t ti = 0; ti < KMTL_MAX_BUFFER_SLOTS; ti++) {
+          total_tg += (ti == c.index) ? c.length : tg_mem_lengths[ti];
+        }
+        if (total_tg > w->props.limits.maxComputeSharedMemorySize) { bad = true; break; }
+        tg_mem_lengths[c.index] = c.length;
+        break;
+      }
+
+      case KMTL_CMD_DISPATCH_THREADGROUPS:
+      case KMTL_CMD_DISPATCH_THREADS: {
+        if (!in_comp || cur_pso_idx < 0 || hdr.size < sizeof(struct kmtl_cmd_dispatch)) { bad = true; break; }
+        vk_pipeline_t *cur_pso = &w->pipelines[cur_pso_idx];
+        struct kmtl_cmd_dispatch c;
+        memcpy(&c, rec, sizeof(c));
+        if (c.gx == 0 || c.gy == 0 || c.gz == 0 ||
+            c.gx > UINT32_MAX || c.gy > UINT32_MAX || c.gz > UINT32_MAX ||
+            !validate_tg_dims(w, cur_pso, c.tx, c.ty, c.tz)) {
+          bad = true;
+          bad_reason = "invalid dispatch dimensions";
+          break;
+        }
+        uint64_t ngx = c.gx, ngy = c.gy, ngz = c.gz;
+        if (hdr.op == KMTL_CMD_DISPATCH_THREADS) {
+          ngx = (c.gx + c.tx - 1) / c.tx;
+          ngy = (c.gy + c.ty - 1) / c.ty;
+          ngz = (c.gz + c.tz - 1) / c.tz;
+        }
+        if (ngx > w->props.limits.maxComputeWorkGroupCount[0] ||
+            ngy > w->props.limits.maxComputeWorkGroupCount[1] ||
+            ngz > w->props.limits.maxComputeWorkGroupCount[2]) {
+          bad = true;
+          bad_reason = "dispatch workgroup count exceeds device limits";
+          break;
+        }
+        TOUCH_PSO_IDX((size_t)cur_pso_idx);
+        if (bad) break;
         for (uint32_t s = 0; s < KMTL_MAX_BUFFER_SLOTS; s++) {
           if (!(cur_pso->binding_mask & (1u << s))) continue;
-          if (bound_is_bytes[s]) {
-            dbis[nw].buffer = w->staging_buf;
-            dbis[nw].offset = bound_bytes_off[s];
-            dbis[nw].range = bound_bytes_len[s];
-          } else if (bound_buf_idx[s] >= 0) {
+          if (bound_is_bytes[s]) continue;
+          if (bound_buf_idx[s] >= 0) {
+            if ((!cur_pso->is_binary || s >= 16u) && (bound_off[s] % w->staging_align) != 0) {
+              bad = true;
+              bad_reason = "unaligned buffer offset for non-AIR pipeline";
+              break;
+            }
             bool is_writable = (cur_pso->readonly_mask & (1u << s)) == 0;
             TOUCH_BUF_IDX((size_t)bound_buf_idx[s], is_writable);
             if (bad) break;
-            dbis[nw].buffer = w->buffers[bound_buf_idx[s]].buffer;
-            dbis[nw].offset = bound_off[s];
-            dbis[nw].range = VK_WHOLE_SIZE;
           } else {
             bad = true;
             bad_reason = "missing buffer binding for compute kernel";
             break;
           }
-          writes[nw] = (VkWriteDescriptorSet){
-              .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-              .dstSet = dset,
-              .dstBinding = s,
-              .descriptorCount = 1,
-              .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-              .pBufferInfo = &dbis[nw],
-          };
-          nw++;
         }
-        if (bad) break;
-        vkUpdateDescriptorSets(w->device, nw, writes, 0, NULL);
-        vkCmdBindDescriptorSets(cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE, cur_pso->pipe_layout, 0, 1, &dset, 0, NULL);
-      }
-
-      {
-        uint32_t ptr_pc[32] = {0};
-        for (uint32_t s = 0; s < 16u; s++) {
-          if (bound_is_bytes[s]) {
-            ptr_pc[s] = 0x80000000u | s;
-            ptr_pc[16u + s] = 0u;
-          } else if (bound_buf_idx[s] >= 0) {
-            ptr_pc[s] = (uint32_t)w->buffers[bound_buf_idx[s]].handle;
-            ptr_pc[16u + s] = (uint32_t)bound_off[s];
-          }
-        }
-        vkCmdPushConstants(cmd_buf, cur_pso->pipe_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ptr_pc), ptr_pc);
-      }
-      vkCmdBindPipeline(cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
-      vkCmdDispatch(cmd_buf, (uint32_t)ngx, (uint32_t)ngy, (uint32_t)ngz);
-      emit_full_barrier(cmd_buf);
-      any_gpu_cmd = true;
-      break;
-    }
-
-    case KMTL_CMD_DISPATCH_INDIRECT: {
-      if (!in_comp || cur_pso_idx < 0 || hdr.size < sizeof(struct kmtl_cmd_dispatch_indirect)) { bad = true; break; }
-      vk_pipeline_t *cur_pso = &w->pipelines[cur_pso_idx];
-      struct kmtl_cmd_dispatch_indirect c;
-      memcpy(&c, rec, sizeof(c));
-      ptrdiff_t ibidx = find_buffer_idx(w, c.buf_handle, req->client_id);
-      if (ibidx < 0 || (c.offset & 3ULL) != 0 || c.offset > w->buffers[ibidx].aligned_len ||
-          w->buffers[ibidx].aligned_len - c.offset < 12 ||
-          !validate_tg_dims(w, cur_pso, c.tx, c.ty, c.tz)) {
-        bad = true;
         break;
       }
-      TOUCH_BUF_IDX((size_t)ibidx, false);
-      TOUCH_PSO_IDX((size_t)cur_pso_idx);
-      if (bad) break;
-      VkPipeline pipe = get_or_create_vk_pipeline(w, cur_pso, (uint32_t)c.tx, (uint32_t)c.ty, (uint32_t)c.tz,
-                                                  deferred_pipes, &n_deferred_pipes);
-      if (!pipe) { bad = true; break; }
-      if (cur_pso->binding_mask != 0) {
-        VkDescriptorSetAllocateInfo dsai = {
-            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-            .descriptorPool = desc_pool,
-            .descriptorSetCount = 1,
-            .pSetLayouts = &cur_pso->ds_layout,
-        };
-        VkDescriptorSet dset = VK_NULL_HANDLE;
-        if (vkAllocateDescriptorSets(w->device, &dsai, &dset) != VK_SUCCESS) { bad = true; break; }
-        VkDescriptorBufferInfo dbis[KMTL_MAX_BUFFER_SLOTS];
-        VkWriteDescriptorSet writes[KMTL_MAX_BUFFER_SLOTS];
-        uint32_t nw = 0;
+
+      case KMTL_CMD_DISPATCH_INDIRECT: {
+        if (!in_comp || cur_pso_idx < 0 || hdr.size < sizeof(struct kmtl_cmd_dispatch_indirect)) { bad = true; break; }
+        vk_pipeline_t *cur_pso = &w->pipelines[cur_pso_idx];
+        struct kmtl_cmd_dispatch_indirect c;
+        memcpy(&c, rec, sizeof(c));
+        ptrdiff_t ibidx = find_buffer_idx(w, c.buf_handle, req->client_id);
+        if (ibidx < 0 || (c.offset & 3ULL) != 0 || c.offset > w->buffers[ibidx].aligned_len ||
+            w->buffers[ibidx].aligned_len - c.offset < 12 ||
+            !validate_tg_dims(w, cur_pso, c.tx, c.ty, c.tz)) {
+          bad = true;
+          break;
+        }
+        TOUCH_BUF_IDX((size_t)ibidx, false);
+        TOUCH_PSO_IDX((size_t)cur_pso_idx);
+        if (bad) break;
         for (uint32_t s = 0; s < KMTL_MAX_BUFFER_SLOTS; s++) {
           if (!(cur_pso->binding_mask & (1u << s))) continue;
-          if (bound_is_bytes[s]) {
-            dbis[nw] = (VkDescriptorBufferInfo){w->staging_buf, bound_bytes_off[s], bound_bytes_len[s]};
-          } else if (bound_buf_idx[s] >= 0) {
+          if (bound_is_bytes[s]) continue;
+          if (bound_buf_idx[s] >= 0) {
+            if ((!cur_pso->is_binary || s >= 16u) && (bound_off[s] % w->staging_align) != 0) {
+              bad = true;
+              bad_reason = "unaligned buffer offset for non-AIR pipeline";
+              break;
+            }
             bool is_writable = (cur_pso->readonly_mask & (1u << s)) == 0;
             TOUCH_BUF_IDX((size_t)bound_buf_idx[s], is_writable);
             if (bad) break;
-            dbis[nw] = (VkDescriptorBufferInfo){w->buffers[bound_buf_idx[s]].buffer, bound_off[s], VK_WHOLE_SIZE};
           } else {
             bad = true;
+            bad_reason = "missing buffer binding for compute kernel";
             break;
           }
-          writes[nw] = (VkWriteDescriptorSet){
-              .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-              .dstSet = dset,
-              .dstBinding = s,
-              .descriptorCount = 1,
-              .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-              .pBufferInfo = &dbis[nw],
-          };
-          nw++;
         }
-        if (bad) break;
-        vkUpdateDescriptorSets(w->device, nw, writes, 0, NULL);
-        vkCmdBindDescriptorSets(cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE, cur_pso->pipe_layout, 0, 1, &dset, 0, NULL);
+        break;
       }
-      {
-        uint32_t ptr_pc[32] = {0};
-        for (uint32_t s = 0; s < 16u; s++) {
-          if (bound_is_bytes[s]) {
-            ptr_pc[s] = 0x80000000u | s;
-            ptr_pc[16u + s] = 0u;
-          } else if (bound_buf_idx[s] >= 0) {
-            ptr_pc[s] = (uint32_t)w->buffers[bound_buf_idx[s]].handle;
-            ptr_pc[16u + s] = (uint32_t)bound_off[s];
-          }
+
+      case KMTL_CMD_MEMORY_BARRIER: {
+        if (!in_comp || hdr.size < sizeof(struct kmtl_cmd_barrier)) { bad = true; break; }
+        struct kmtl_cmd_barrier c;
+        memcpy(&c, rec, sizeof(c));
+        if (c.scope == 0 || (c.scope & ~3u) != 0) { bad = true; break; }
+        break;
+      }
+
+      case KMTL_CMD_BLIT_COPY_BUFFER: {
+        if (!in_blit || hdr.size < sizeof(struct kmtl_cmd_blit_copy)) { bad = true; break; }
+        struct kmtl_cmd_blit_copy c;
+        memcpy(&c, rec, sizeof(c));
+        ptrdiff_t sidx = find_buffer_idx(w, c.src_handle, req->client_id);
+        ptrdiff_t didx = find_buffer_idx(w, c.dst_handle, req->client_id);
+        if (sidx < 0 || didx < 0 ||
+            c.src_offset > w->buffers[sidx].aligned_len || c.dst_offset > w->buffers[didx].aligned_len ||
+            c.size > w->buffers[sidx].aligned_len - c.src_offset ||
+            c.size > w->buffers[didx].aligned_len - c.dst_offset) {
+          bad = true;
+          break;
         }
-        vkCmdPushConstants(cmd_buf, cur_pso->pipe_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ptr_pc), ptr_pc);
+        if (c.size > 0) {
+          TOUCH_BUF_IDX((size_t)sidx, false);
+          TOUCH_BUF_IDX((size_t)didx, true);
+        }
+        break;
       }
-      vkCmdBindPipeline(cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
-      vkCmdDispatchIndirect(cmd_buf, w->buffers[ibidx].buffer, c.offset);
-      emit_full_barrier(cmd_buf);
-      any_gpu_cmd = true;
-      break;
-    }
 
-    case KMTL_CMD_MEMORY_BARRIER: {
-      if (!in_comp || hdr.size < sizeof(struct kmtl_cmd_barrier)) { bad = true; break; }
-      struct kmtl_cmd_barrier c;
-      memcpy(&c, rec, sizeof(c));
-      if (c.scope == 0 || (c.scope & ~3u) != 0) { bad = true; break; }
-      emit_full_barrier(cmd_buf);
-      break;
-    }
+      case KMTL_CMD_BLIT_FILL_BUFFER: {
+        if (!in_blit || hdr.size < sizeof(struct kmtl_cmd_blit_fill)) { bad = true; break; }
+        struct kmtl_cmd_blit_fill c;
+        memcpy(&c, rec, sizeof(c));
+        ptrdiff_t didx = find_buffer_idx(w, c.dst_handle, req->client_id);
+        if (didx < 0 || c.offset > w->buffers[didx].aligned_len || c.size > w->buffers[didx].aligned_len - c.offset) {
+          bad = true;
+          break;
+        }
+        if (c.size > 0) {
+          TOUCH_BUF_IDX((size_t)didx, true);
+        }
+        break;
+      }
 
-    case KMTL_CMD_BLIT_COPY_BUFFER: {
-      if (!in_blit || hdr.size < sizeof(struct kmtl_cmd_blit_copy)) { bad = true; break; }
-      struct kmtl_cmd_blit_copy c;
-      memcpy(&c, rec, sizeof(c));
-      ptrdiff_t sidx = find_buffer_idx(w, c.src_handle, req->client_id);
-      ptrdiff_t didx = find_buffer_idx(w, c.dst_handle, req->client_id);
-      if (sidx < 0 || didx < 0 ||
-          c.src_offset > w->buffers[sidx].aligned_len || c.dst_offset > w->buffers[didx].aligned_len ||
-          c.size > w->buffers[sidx].aligned_len - c.src_offset ||
-          c.size > w->buffers[didx].aligned_len - c.dst_offset) {
+      default:
         bad = true;
         break;
       }
-      if (c.size > 0) {
-        TOUCH_BUF_IDX((size_t)sidx, false);
-        TOUCH_BUF_IDX((size_t)didx, true);
-        if (bad) break;
-        VkBufferCopy region = {.srcOffset = c.src_offset, .dstOffset = c.dst_offset, .size = c.size};
-        vkCmdCopyBuffer(cmd_buf, w->buffers[sidx].buffer, w->buffers[didx].buffer, 1, &region);
-        emit_full_barrier(cmd_buf);
-        any_gpu_cmd = true;
-      }
-      break;
-    }
-
-    case KMTL_CMD_BLIT_FILL_BUFFER: {
-      if (!in_blit || hdr.size < sizeof(struct kmtl_cmd_blit_fill)) { bad = true; break; }
-      struct kmtl_cmd_blit_fill c;
-      memcpy(&c, rec, sizeof(c));
-      ptrdiff_t didx = find_buffer_idx(w, c.dst_handle, req->client_id);
-      if (didx < 0 || c.offset > w->buffers[didx].aligned_len || c.size > w->buffers[didx].aligned_len - c.offset) {
-        bad = true;
-        break;
-      }
-      if (c.size > 0) {
-        TOUCH_BUF_IDX((size_t)didx, true);
-        if (bad) break;
-        if ((c.offset & 3ULL) == 0 && (c.size & 3ULL) == 0) {
-          uint32_t v32 = (uint32_t)c.value * 0x01010101u;
-          vkCmdFillBuffer(cmd_buf, w->buffers[didx].buffer, c.offset, c.size, v32);
-          emit_full_barrier(cmd_buf);
-          any_gpu_cmd = true;
-        } else {
-          uint64_t remaining = c.size;
-          uint64_t dst_off = c.offset;
-          while (remaining > 0) {
-            uint64_t off = align_up(staging_cursor, 4);
-            if (off >= w->slot_staging_bytes) { bad = true; bad_reason = "staging full for unaligned fill"; break; }
-            uint64_t chunk = w->slot_staging_bytes - off;
-            if (chunk > remaining) chunk = remaining;
-            memset(w->staging_ptr + staging_base + off, c.value, (size_t)chunk);
-            VkBufferCopy r = {.srcOffset = staging_base + off, .dstOffset = dst_off, .size = chunk};
-            vkCmdCopyBuffer(cmd_buf, w->staging_buf, w->buffers[didx].buffer, 1, &r);
-            staging_cursor = off + chunk;
-            dst_off += chunk;
-            remaining -= chunk;
-            any_gpu_cmd = true;
-          }
-          if (!bad) emit_full_barrier(cmd_buf);
-        }
-      }
-      break;
-    }
-
-    default:
-      bad = true;
-      break;
     }
   }
   #undef TOUCH_BUF_IDX
   #undef TOUCH_PSO_IDX
 
-  if (use_ts && any_gpu_cmd && !bad) {
-    vkCmdWriteTimestamp(cmd_buf, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, slot->query_pool, 1);
-  }
-  if (vkEndCommandBuffer(cmd_buf) != VK_SUCCESS) {
-    bad = true;
-    bad_reason = "vkEndCommandBuffer failed";
-  }
   if (bad) {
-    vkResetCommandBuffer(cmd_buf, 0);
-    if (n_deferred_pipes > 0 && w->slots_in_flight > 0) {
-      if (!drain_all_inflight(w)) {
-        send_err(w->sock_fd, KMTL_ERR_GPU, "in-flight GPU command buffer failed", out_cap);
-        return false;
-      }
-    }
-    for (size_t i = 0; i < n_deferred_pipes; i++) {
-      vkDestroyPipeline(w->device, deferred_pipes[i], NULL);
-    }
     return send_err(w->sock_fd, KMTL_ERR_INVAL, bad_reason, out_cap);
   }
 
-  /* Pre-submit CPU->GPU coherency sync over full aligned_len */
+  /* Phase 2: Pre-submit CPU->GPU coherency sync once over all touched buffers. */
   for (size_t i = 0; i < n_touched; i++) {
     vk_buffer_t *b = &w->buffers[touched_idx[i]];
     if (b->is_dmabuf || b->is_host_ptr) {
@@ -3033,6 +3031,10 @@ static bool handle_commit(worker_t *w,
         }
         if (w->shm_base) {
           arm64_flush_poc_parallel(w, w->shm_base + b->shm_offset, (size_t)b->aligned_len, touched_written[i]);
+          if (touched_written[i] && b->gpu_dirty) {
+            b->gpu_dirty = false;
+            if (w->gpu_dirty_count > 0) w->gpu_dirty_count--;
+          }
         }
 #else
         if (b->is_dmabuf) {
@@ -3061,7 +3063,473 @@ static bool handle_commit(worker_t *w,
     }
   }
 
-  uint64_t submit_ns = monotonic_ns();
+  /* Phase 3: Record Vulkan command buffer(s), transparently splitting oversized CBs into chunks. */
+  vk_cmd_slot_t *slot = &w->slots[w->slot_tail];
+  VkCommandBuffer cmd_buf = slot->cmd_buf;
+  VkDescriptorPool desc_pool = slot->desc_pool;
+  uint64_t staging_base = slot->staging_base;
+
+  vkResetDescriptorPool(w->device, desc_pool, 0);
+  vkResetCommandBuffer(cmd_buf, 0);
+  VkCommandBufferBeginInfo cbbi = {
+      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+      .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+  };
+  if (vkBeginCommandBuffer(cmd_buf, &cbbi) != VK_SUCCESS) {
+    return send_err(w->sock_fd, KMTL_ERR_GPU, "vkBeginCommandBuffer failed", out_cap);
+  }
+
+  bool use_ts = w->has_timestamps && slot->query_pool != VK_NULL_HANDLE;
+  if (use_ts) {
+    vkCmdResetQueryPool(cmd_buf, slot->query_pool, 0, 2);
+    vkCmdWriteTimestamp(cmd_buf, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, slot->query_pool, 0);
+  }
+
+  VkPipeline deferred_pipes[KMTL_MAX_DEFERRED_PIPES];
+  size_t n_deferred_pipes = 0;
+
+  ptrdiff_t cur_pso_idx = -1;
+  bool in_comp_concurrent = false;
+  ptrdiff_t bound_buf_idx[KMTL_MAX_BUFFER_SLOTS];
+  for (uint32_t s = 0; s < KMTL_MAX_BUFFER_SLOTS; s++) bound_buf_idx[s] = -1;
+  uint64_t bound_off[KMTL_MAX_BUFFER_SLOTS] = {0};
+  bool bound_is_bytes[KMTL_MAX_BUFFER_SLOTS] = {false};
+  const uint8_t *bound_bytes_src[KMTL_MAX_BUFFER_SLOTS] = {NULL};
+  uint64_t bound_bytes_off[KMTL_MAX_BUFFER_SLOTS] = {0};
+  uint32_t bound_bytes_len[KMTL_MAX_BUFFER_SLOTS] = {0};
+  uint64_t staging_cursor = 0;
+  uint32_t chunk_dispatches = 0;
+  uint32_t chunk_desc_sets = 0;
+  uint64_t chunk_workgroups = 0;
+  bool any_gpu_cmd = false;
+  bool did_intermediate_flush = false;
+  bool submitted_pending = false;
+  uint64_t first_submit_ns = 0;
+  bool gpu_fatal = false;
+
+  size_t pos = 0;
+  while (pos < stream_len && !bad) {
+    struct kmtl_cmd_hdr hdr;
+    memcpy(&hdr, stream + pos, sizeof(hdr));
+    const uint8_t *rec = stream + pos;
+    pos += hdr.size;
+
+    switch (hdr.op) {
+    case KMTL_CMD_BEGIN_COMPUTE:
+      in_comp_concurrent = (hdr.flags == 1u);
+      cur_pso_idx = -1;
+      for (uint32_t s = 0; s < KMTL_MAX_BUFFER_SLOTS; s++) bound_buf_idx[s] = -1;
+      memset(bound_off, 0, sizeof(bound_off));
+      memset(bound_is_bytes, 0, sizeof(bound_is_bytes));
+      memset(bound_bytes_src, 0, sizeof(bound_bytes_src));
+      memset(bound_bytes_len, 0, sizeof(bound_bytes_len));
+      if (any_gpu_cmd || w->slots_in_flight > 0) emit_full_barrier(cmd_buf);
+      break;
+
+    case KMTL_CMD_BEGIN_BLIT:
+      if (any_gpu_cmd || w->slots_in_flight > 0) emit_full_barrier(cmd_buf);
+      break;
+
+    case KMTL_CMD_END_ENCODER:
+      if (in_comp_concurrent && any_gpu_cmd) emit_full_barrier(cmd_buf);
+      in_comp_concurrent = false;
+      cur_pso_idx = -1;
+      memset(bound_is_bytes, 0, sizeof(bound_is_bytes));
+      memset(bound_bytes_src, 0, sizeof(bound_bytes_src));
+      memset(bound_bytes_len, 0, sizeof(bound_bytes_len));
+      break;
+
+    case KMTL_CMD_SET_PIPELINE: {
+      struct kmtl_cmd_set_pipeline c;
+      memcpy(&c, rec, sizeof(c));
+      cur_pso_idx = find_pipeline_idx(w, c.pso_handle, req->client_id);
+      break;
+    }
+
+    case KMTL_CMD_SET_BUFFER: {
+      struct kmtl_cmd_set_buffer c;
+      memcpy(&c, rec, sizeof(c));
+      bound_is_bytes[c.index] = false;
+      bound_bytes_src[c.index] = NULL;
+      bound_bytes_len[c.index] = 0;
+      if (c.buf_handle == 0) {
+        bound_buf_idx[c.index] = -1;
+        bound_off[c.index] = 0;
+      } else {
+        bound_buf_idx[c.index] = find_buffer_idx(w, c.buf_handle, req->client_id);
+        bound_off[c.index] = c.offset;
+      }
+      break;
+    }
+
+    case KMTL_CMD_SET_BUFFER_OFFSET: {
+      struct kmtl_cmd_set_buffer_offset c;
+      memcpy(&c, rec, sizeof(c));
+      bound_off[c.index] = c.offset;
+      break;
+    }
+
+    case KMTL_CMD_SET_BYTES: {
+      struct kmtl_cmd_set_bytes c;
+      memcpy(&c, rec, sizeof(c));
+      uint64_t off = align_up(staging_cursor, w->staging_align);
+      if (off + c.length > w->slot_staging_bytes) {
+        bound_is_bytes[c.index] = false;
+        bound_bytes_src[c.index] = NULL;
+        bound_bytes_len[c.index] = 0;
+        if (!any_gpu_cmd) {
+          if (!repack_active_set_bytes(w, slot, bound_is_bytes, bound_bytes_src, bound_bytes_off,
+                                       bound_bytes_len, &staging_cursor)) {
+            bad = true;
+            gpu_fatal = did_intermediate_flush;
+            bad_reason = "staging buffer exhausted for setBytes";
+            break;
+          }
+        } else if (!flush_commit_chunk(w, slot, deferred_pipes, &n_deferred_pipes,
+                                       bound_is_bytes, bound_bytes_src, bound_bytes_off, bound_bytes_len,
+                                       &staging_cursor, &chunk_dispatches, &chunk_desc_sets, &chunk_workgroups,
+                                       &any_gpu_cmd, &did_intermediate_flush, &first_submit_ns, &use_ts,
+                                       &submitted_pending)) {
+          bad = true;
+          gpu_fatal = true;
+          bad_reason = "intermediate command buffer chunk flush failed";
+          break;
+        }
+        off = align_up(staging_cursor, w->staging_align);
+        if (off + c.length > w->slot_staging_bytes) {
+          bad = true;
+          gpu_fatal = did_intermediate_flush;
+          bad_reason = "staging buffer exhausted for setBytes";
+          break;
+        }
+      }
+      memcpy(w->staging_ptr + staging_base + off, rec + sizeof(c), c.length);
+      staging_cursor = off + c.length;
+      bound_buf_idx[c.index] = -1;
+      bound_is_bytes[c.index] = true;
+      bound_bytes_src[c.index] = rec + sizeof(c);
+      bound_bytes_off[c.index] = staging_base + off;
+      bound_bytes_len[c.index] = c.length;
+      break;
+    }
+
+    case KMTL_CMD_SET_TG_MEM:
+      break;
+
+    case KMTL_CMD_DISPATCH_THREADGROUPS:
+    case KMTL_CMD_DISPATCH_THREADS: {
+      vk_pipeline_t *cur_pso = &w->pipelines[cur_pso_idx];
+      struct kmtl_cmd_dispatch c;
+      memcpy(&c, rec, sizeof(c));
+      uint64_t ngx = c.gx, ngy = c.gy, ngz = c.gz;
+      if (hdr.op == KMTL_CMD_DISPATCH_THREADS) {
+        ngx = (c.gx + c.tx - 1) / c.tx;
+        ngy = (c.gy + c.ty - 1) / c.ty;
+        ngz = (c.gz + c.tz - 1) / c.tz;
+      }
+      uint64_t disp_wgs = ngx;
+      if (ngy > 0 && disp_wgs <= UINT64_MAX / ngy) disp_wgs *= ngy;
+      else disp_wgs = UINT64_MAX;
+      if (ngz > 0 && disp_wgs <= UINT64_MAX / ngz) disp_wgs *= ngz;
+      else disp_wgs = UINT64_MAX;
+      if (any_gpu_cmd &&
+          (chunk_dispatches >= w->max_chunk_dispatches ||
+           chunk_desc_sets >= KMTL_CHUNK_MAX_DESC_SETS ||
+           chunk_workgroups >= w->max_chunk_workgroups ||
+           (disp_wgs <= w->max_chunk_workgroups && chunk_workgroups > w->max_chunk_workgroups - disp_wgs))) {
+        if (!flush_commit_chunk(w, slot, deferred_pipes, &n_deferred_pipes,
+                                bound_is_bytes, bound_bytes_src, bound_bytes_off, bound_bytes_len,
+                                &staging_cursor, &chunk_dispatches, &chunk_desc_sets, &chunk_workgroups,
+                                &any_gpu_cmd, &did_intermediate_flush, &first_submit_ns, &use_ts,
+                                &submitted_pending)) {
+          bad = true;
+          gpu_fatal = true;
+          bad_reason = "intermediate command buffer chunk flush failed";
+          break;
+        }
+      }
+      VkPipeline pipe = get_or_create_vk_pipeline(w, cur_pso, (uint32_t)c.tx, (uint32_t)c.ty, (uint32_t)c.tz,
+                                                  deferred_pipes, &n_deferred_pipes);
+      if (!pipe) {
+        bad = true;
+        gpu_fatal = did_intermediate_flush;
+        bad_reason = "vkCreateComputePipelines failed";
+        break;
+      }
+
+      if (cur_pso->binding_mask != 0) {
+        VkDescriptorSetAllocateInfo dsai = {
+            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+            .descriptorPool = desc_pool,
+            .descriptorSetCount = 1,
+            .pSetLayouts = &cur_pso->ds_layout,
+        };
+        VkDescriptorSet dset = VK_NULL_HANDLE;
+        if (vkAllocateDescriptorSets(w->device, &dsai, &dset) != VK_SUCCESS) {
+          bad = true;
+          gpu_fatal = did_intermediate_flush;
+          bad_reason = "vkAllocateDescriptorSets failed";
+          break;
+        }
+        chunk_desc_sets++;
+        VkDescriptorBufferInfo dbis[KMTL_MAX_BUFFER_SLOTS];
+        VkWriteDescriptorSet writes[KMTL_MAX_BUFFER_SLOTS];
+        uint32_t nw = 0;
+        for (uint32_t s = 0; s < KMTL_MAX_BUFFER_SLOTS; s++) {
+          if (!(cur_pso->binding_mask & (1u << s))) continue;
+          if (bound_is_bytes[s]) {
+            dbis[nw].buffer = w->staging_buf;
+            dbis[nw].offset = bound_bytes_off[s];
+            dbis[nw].range = bound_bytes_len[s];
+          } else {
+            uint64_t desc_off = bound_off[s];
+            if (cur_pso->is_binary && s < 16u && w->staging_align > 1u) {
+              desc_off = bound_off[s] - (bound_off[s] % w->staging_align);
+            }
+            dbis[nw].buffer = w->buffers[bound_buf_idx[s]].buffer;
+            dbis[nw].offset = desc_off;
+            dbis[nw].range = VK_WHOLE_SIZE;
+          }
+          writes[nw] = (VkWriteDescriptorSet){
+              .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+              .dstSet = dset,
+              .dstBinding = s,
+              .descriptorCount = 1,
+              .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+              .pBufferInfo = &dbis[nw],
+          };
+          nw++;
+        }
+        vkUpdateDescriptorSets(w->device, nw, writes, 0, NULL);
+        vkCmdBindDescriptorSets(cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE, cur_pso->pipe_layout, 0, 1, &dset, 0, NULL);
+      }
+
+      {
+        uint32_t ptr_pc[32] = {0};
+        for (uint32_t s = 0; s < 16u; s++) {
+          if (bound_is_bytes[s]) {
+            ptr_pc[s] = 0x80000000u | s;
+            ptr_pc[16u + s] = 0u;
+          } else if (bound_buf_idx[s] >= 0) {
+            ptr_pc[s] = (uint32_t)w->buffers[bound_buf_idx[s]].handle;
+            ptr_pc[16u + s] = (uint32_t)bound_off[s];
+          }
+        }
+        vkCmdPushConstants(cmd_buf, cur_pso->pipe_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ptr_pc), ptr_pc);
+      }
+      vkCmdBindPipeline(cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
+      vkCmdDispatch(cmd_buf, (uint32_t)ngx, (uint32_t)ngy, (uint32_t)ngz);
+      if (!in_comp_concurrent) emit_full_barrier(cmd_buf);
+      chunk_dispatches++;
+      if (disp_wgs <= UINT64_MAX - chunk_workgroups) chunk_workgroups += disp_wgs;
+      else chunk_workgroups = UINT64_MAX;
+      any_gpu_cmd = true;
+      break;
+    }
+
+    case KMTL_CMD_DISPATCH_INDIRECT: {
+      if (any_gpu_cmd &&
+          (chunk_dispatches >= w->max_chunk_dispatches ||
+           chunk_desc_sets >= KMTL_CHUNK_MAX_DESC_SETS ||
+           chunk_workgroups >= w->max_chunk_workgroups)) {
+        if (!flush_commit_chunk(w, slot, deferred_pipes, &n_deferred_pipes,
+                                bound_is_bytes, bound_bytes_src, bound_bytes_off, bound_bytes_len,
+                                &staging_cursor, &chunk_dispatches, &chunk_desc_sets, &chunk_workgroups,
+                                &any_gpu_cmd, &did_intermediate_flush, &first_submit_ns, &use_ts,
+                                &submitted_pending)) {
+          bad = true;
+          gpu_fatal = true;
+          bad_reason = "intermediate command buffer chunk flush failed";
+          break;
+        }
+      }
+      vk_pipeline_t *cur_pso = &w->pipelines[cur_pso_idx];
+      struct kmtl_cmd_dispatch_indirect c;
+      memcpy(&c, rec, sizeof(c));
+      ptrdiff_t ibidx = find_buffer_idx(w, c.buf_handle, req->client_id);
+      VkPipeline pipe = get_or_create_vk_pipeline(w, cur_pso, (uint32_t)c.tx, (uint32_t)c.ty, (uint32_t)c.tz,
+                                                  deferred_pipes, &n_deferred_pipes);
+      if (!pipe) {
+        bad = true;
+        gpu_fatal = did_intermediate_flush;
+        bad_reason = "vkCreateComputePipelines failed";
+        break;
+      }
+      if (cur_pso->binding_mask != 0) {
+        VkDescriptorSetAllocateInfo dsai = {
+            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+            .descriptorPool = desc_pool,
+            .descriptorSetCount = 1,
+            .pSetLayouts = &cur_pso->ds_layout,
+        };
+        VkDescriptorSet dset = VK_NULL_HANDLE;
+        if (vkAllocateDescriptorSets(w->device, &dsai, &dset) != VK_SUCCESS) {
+          bad = true;
+          gpu_fatal = did_intermediate_flush;
+          bad_reason = "vkAllocateDescriptorSets failed";
+          break;
+        }
+        chunk_desc_sets++;
+        VkDescriptorBufferInfo dbis[KMTL_MAX_BUFFER_SLOTS];
+        VkWriteDescriptorSet writes[KMTL_MAX_BUFFER_SLOTS];
+        uint32_t nw = 0;
+        for (uint32_t s = 0; s < KMTL_MAX_BUFFER_SLOTS; s++) {
+          if (!(cur_pso->binding_mask & (1u << s))) continue;
+          if (bound_is_bytes[s]) {
+            dbis[nw] = (VkDescriptorBufferInfo){w->staging_buf, bound_bytes_off[s], bound_bytes_len[s]};
+          } else {
+            uint64_t desc_off = bound_off[s];
+            if (cur_pso->is_binary && s < 16u && w->staging_align > 1u) {
+              desc_off = bound_off[s] - (bound_off[s] % w->staging_align);
+            }
+            dbis[nw] = (VkDescriptorBufferInfo){w->buffers[bound_buf_idx[s]].buffer, desc_off, VK_WHOLE_SIZE};
+          }
+          writes[nw] = (VkWriteDescriptorSet){
+              .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+              .dstSet = dset,
+              .dstBinding = s,
+              .descriptorCount = 1,
+              .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+              .pBufferInfo = &dbis[nw],
+          };
+          nw++;
+        }
+        vkUpdateDescriptorSets(w->device, nw, writes, 0, NULL);
+        vkCmdBindDescriptorSets(cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE, cur_pso->pipe_layout, 0, 1, &dset, 0, NULL);
+      }
+      {
+        uint32_t ptr_pc[32] = {0};
+        for (uint32_t s = 0; s < 16u; s++) {
+          if (bound_is_bytes[s]) {
+            ptr_pc[s] = 0x80000000u | s;
+            ptr_pc[16u + s] = 0u;
+          } else if (bound_buf_idx[s] >= 0) {
+            ptr_pc[s] = (uint32_t)w->buffers[bound_buf_idx[s]].handle;
+            ptr_pc[16u + s] = (uint32_t)bound_off[s];
+          }
+        }
+        vkCmdPushConstants(cmd_buf, cur_pso->pipe_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ptr_pc), ptr_pc);
+      }
+      vkCmdBindPipeline(cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
+      vkCmdDispatchIndirect(cmd_buf, w->buffers[ibidx].buffer, c.offset);
+      if (!in_comp_concurrent) emit_full_barrier(cmd_buf);
+      chunk_dispatches++;
+      if (KMTL_INDIRECT_WG_ESTIMATE <= UINT64_MAX - chunk_workgroups) {
+        chunk_workgroups += KMTL_INDIRECT_WG_ESTIMATE;
+      } else {
+        chunk_workgroups = UINT64_MAX;
+      }
+      any_gpu_cmd = true;
+      break;
+    }
+
+    case KMTL_CMD_MEMORY_BARRIER:
+      emit_full_barrier(cmd_buf);
+      break;
+
+    case KMTL_CMD_BLIT_COPY_BUFFER: {
+      struct kmtl_cmd_blit_copy c;
+      memcpy(&c, rec, sizeof(c));
+      if (c.size > 0) {
+        ptrdiff_t sidx = find_buffer_idx(w, c.src_handle, req->client_id);
+        ptrdiff_t didx = find_buffer_idx(w, c.dst_handle, req->client_id);
+        VkBufferCopy region = {.srcOffset = c.src_offset, .dstOffset = c.dst_offset, .size = c.size};
+        vkCmdCopyBuffer(cmd_buf, w->buffers[sidx].buffer, w->buffers[didx].buffer, 1, &region);
+        emit_full_barrier(cmd_buf);
+        any_gpu_cmd = true;
+      }
+      break;
+    }
+
+    case KMTL_CMD_BLIT_FILL_BUFFER: {
+      struct kmtl_cmd_blit_fill c;
+      memcpy(&c, rec, sizeof(c));
+      if (c.size > 0) {
+        ptrdiff_t didx = find_buffer_idx(w, c.dst_handle, req->client_id);
+        if ((c.offset & 3ULL) == 0 && (c.size & 3ULL) == 0) {
+          uint32_t v32 = (uint32_t)c.value * 0x01010101u;
+          vkCmdFillBuffer(cmd_buf, w->buffers[didx].buffer, c.offset, c.size, v32);
+          emit_full_barrier(cmd_buf);
+          any_gpu_cmd = true;
+        } else {
+          uint64_t remaining = c.size;
+          uint64_t dst_off = c.offset;
+          while (remaining > 0) {
+            uint64_t off = align_up(staging_cursor, 4);
+            if (off >= w->slot_staging_bytes) {
+              if (!any_gpu_cmd) {
+                staging_cursor = 0;
+              } else if (!flush_commit_chunk(w, slot, deferred_pipes, &n_deferred_pipes,
+                                             bound_is_bytes, bound_bytes_src, bound_bytes_off, bound_bytes_len,
+                                             &staging_cursor, &chunk_dispatches, &chunk_desc_sets, &chunk_workgroups,
+                                             &any_gpu_cmd, &did_intermediate_flush, &first_submit_ns, &use_ts,
+                                             &submitted_pending)) {
+                bad = true;
+                gpu_fatal = true;
+                bad_reason = "intermediate command buffer chunk flush failed";
+                break;
+              }
+              off = align_up(staging_cursor, 4);
+              if (off >= w->slot_staging_bytes) {
+                bad = true;
+                gpu_fatal = did_intermediate_flush;
+                bad_reason = "staging full for unaligned fill";
+                break;
+              }
+            }
+            uint64_t chunk = w->slot_staging_bytes - off;
+            if (chunk > remaining) chunk = remaining;
+            memset(w->staging_ptr + staging_base + off, c.value, (size_t)chunk);
+            VkBufferCopy r = {.srcOffset = staging_base + off, .dstOffset = dst_off, .size = chunk};
+            vkCmdCopyBuffer(cmd_buf, w->staging_buf, w->buffers[didx].buffer, 1, &r);
+            staging_cursor = off + chunk;
+            dst_off += chunk;
+            remaining -= chunk;
+            any_gpu_cmd = true;
+          }
+          if (!bad) emit_full_barrier(cmd_buf);
+        }
+      }
+      break;
+    }
+
+    default:
+      break;
+    }
+  }
+
+  if (use_ts && any_gpu_cmd && !bad) {
+    vkCmdWriteTimestamp(cmd_buf, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, slot->query_pool, 1);
+  }
+  if (!bad && vkEndCommandBuffer(cmd_buf) != VK_SUCCESS) {
+    bad = true;
+    gpu_fatal = did_intermediate_flush;
+    bad_reason = "vkEndCommandBuffer failed";
+  }
+  if (bad) {
+    if (submitted_pending) {
+      /* Never reset a pending VkCommandBuffer or destroy pipelines while GPU execution may be active. */
+      send_err(w->sock_fd, KMTL_ERR_GPU, bad_reason, out_cap);
+      return false;
+    }
+    vkResetCommandBuffer(cmd_buf, 0);
+    if (n_deferred_pipes > 0 && w->slots_in_flight > 0) {
+      if (!drain_all_inflight(w)) {
+        send_err(w->sock_fd, KMTL_ERR_GPU, "in-flight GPU command buffer failed", out_cap);
+        return false;
+      }
+    }
+    for (size_t i = 0; i < n_deferred_pipes; i++) {
+      vkDestroyPipeline(w->device, deferred_pipes[i], NULL);
+    }
+    if (gpu_fatal) {
+      send_err(w->sock_fd, KMTL_ERR_GPU, bad_reason, out_cap);
+      return false;
+    }
+    return send_err(w->sock_fd, KMTL_ERR_INVAL, bad_reason, out_cap);
+  }
+
+  uint64_t submit_ns = did_intermediate_flush ? first_submit_ns : monotonic_ns();
   if (any_gpu_cmd) {
     vkResetFences(w->device, 1, &slot->fence);
     VkSubmitInfo si = {
@@ -3083,7 +3551,7 @@ static bool handle_commit(worker_t *w,
   }
 
   uint64_t seq = ++q->submitted_seq;
-  if (!any_gpu_cmd && w->slots_in_flight == 0) {
+  if (!any_gpu_cmd && !did_intermediate_flush && w->slots_in_flight == 0) {
     for (size_t i = 0; i < n_deferred_pipes; i++) {
       vkDestroyPipeline(w->device, deferred_pipes[i], NULL);
     }
@@ -3095,7 +3563,7 @@ static bool handle_commit(worker_t *w,
     /* Pin all referenced buffers & pipelines until slot retires. */
     slot->in_flight = true;
     slot->has_gpu_cmd = any_gpu_cmd;
-    slot->had_timestamps = use_ts && any_gpu_cmd;
+    slot->had_timestamps = use_ts && any_gpu_cmd && !did_intermediate_flush;
     slot->queue_handle = q->handle;
     slot->client_id = req->client_id;
     slot->queue_seq = seq;
@@ -3121,7 +3589,7 @@ static bool handle_commit(worker_t *w,
   }
 
   if (req->arg0 & KMTL_COMMIT_WAIT_COMPLETED) {
-    if (!retire_up_to_queue_seq(w, q, seq)) {
+    if (!retire_up_to_queue_seq(w, q, seq) || !flush_gpu_dirty_buffers(w, req->client_id)) {
       send_err(w->sock_fd, KMTL_ERR_GPU, "vkWaitForFences failed or timed out", out_cap);
       return false;
     }
@@ -3177,7 +3645,11 @@ static bool handle_rpc(worker_t *w,
     info.max_buffer_length = max_buf;
     info.recommended_max_working_set_size = w->shm_size;
     info.shm_aperture_bytes = w->shm_size;
-    info.gpu_family_mask = KMTL_FAM_COMMON1 | KMTL_FAM_COMMON2 | KMTL_FAM_COMMON3 | KMTL_FAM_METAL3;
+    uint32_t sg_req = (1u << 0) | (1u << 2) | (1u << 4); /* basic + arithmetic + shuffle */
+    info.gpu_family_mask = KMTL_FAM_COMMON1 | KMTL_FAM_COMMON2 | KMTL_FAM_COMMON3;
+    if ((w->subgroup_ops & sg_req) == sg_req) {
+      info.gpu_family_mask |= KMTL_FAM_METAL3;
+    }
     info.max_threads_per_threadgroup[0] = w->props.limits.maxComputeWorkGroupSize[0];
     info.max_threads_per_threadgroup[1] = w->props.limits.maxComputeWorkGroupSize[1];
     info.max_threads_per_threadgroup[2] = w->props.limits.maxComputeWorkGroupSize[2];
@@ -3187,6 +3659,7 @@ static bool handle_rpc(worker_t *w,
 #ifdef KIDO_HAVE_AIR2SPV
                  | KMTL_FEAT_NATIVE_METALLIB
 #endif
+                 | (w->has_bf16 ? KMTL_FEAT_BFLOAT16 : 0u)
                  | (w->vmm_dma_coherent ? KMTL_FEAT_DMA_COHERENT : 0u);
     struct kmtl_resp_hdr resp = {0};
     return send_resp(w->sock_fd, resp, &info, (uint32_t)sizeof(info), out_cap);
@@ -3478,13 +3951,18 @@ static bool handle_rpc(worker_t *w,
     lib->num_macros = co.num_macros;
     w->total_lib_source_bytes += co.source_len;
 
-    char names_buf[8192];
-    size_t names_len = msl_extract_kernel_names(src, co.source_len, names_buf, sizeof(names_buf));
+    size_t max_names = (out_cap < KMTL_MAX_OUT_PAYLOAD) ? (size_t)out_cap : (size_t)KMTL_MAX_OUT_PAYLOAD;
+    size_t need_names = msl_extract_kernel_names(src, co.source_len, NULL, 0);
+    size_t names_cap = (need_names < max_names) ? need_names : max_names;
+    char *names_buf = names_cap > 0 ? malloc(names_cap) : NULL;
+    size_t names_len = names_buf ? msl_extract_kernel_names(src, co.source_len, names_buf, names_cap) : 0;
 
     struct kmtl_resp_hdr resp = {0};
     resp.status = KMTL_OK;
     resp.handle = handle;
-    return send_resp(w->sock_fd, resp, names_buf, (uint32_t)names_len, out_cap);
+    bool ok = send_resp(w->sock_fd, resp, names_buf, (uint32_t)names_len, out_cap);
+    free(names_buf);
+    return ok;
 
   bad_macros:
     free(src);
@@ -3512,12 +3990,18 @@ static bool handle_rpc(worker_t *w,
       return send_err(w->sock_fd, KMTL_ERR_COMPILE, perr, out_cap);
     }
 
-    char names_buf[16384];
-    size_t names_len = metallib_encode_compute_names(&midx, names_buf, sizeof(names_buf));
+    size_t max_names = (out_cap < KMTL_MAX_OUT_PAYLOAD) ? (size_t)out_cap : (size_t)KMTL_MAX_OUT_PAYLOAD;
+    size_t need_names = metallib_encode_compute_names(&midx, NULL, 0);
+    size_t names_cap = (need_names < max_names) ? need_names : max_names;
+    char *names_buf = names_cap > 0 ? malloc(names_cap) : NULL;
+    size_t names_len = names_buf ? metallib_encode_compute_names(&midx, names_buf, names_cap) : 0;
     metallib_index_free(&midx);
 
     uint8_t *bin_copy = malloc(in_len);
-    if (!bin_copy) return send_err(w->sock_fd, KMTL_ERR_NOMEM, "host OOM", out_cap);
+    if (!bin_copy) {
+      free(names_buf);
+      return send_err(w->sock_fd, KMTL_ERR_NOMEM, "host OOM", out_cap);
+    }
     memcpy(bin_copy, in_payload, in_len);
 
     size_t idx = w->libraries_cap;
@@ -3528,6 +4012,7 @@ static bool handle_rpc(worker_t *w,
       size_t ncap = w->libraries_cap ? w->libraries_cap * 2 : 32;
       vk_library_t *nl = realloc(w->libraries, ncap * sizeof(*nl));
       if (!nl) {
+        free(names_buf);
         free(bin_copy);
         return send_err(w->sock_fd, KMTL_ERR_NOMEM, "host OOM", out_cap);
       }
@@ -3550,7 +4035,9 @@ static bool handle_rpc(worker_t *w,
     struct kmtl_resp_hdr resp = {0};
     resp.status = KMTL_OK;
     resp.handle = handle;
-    return send_resp(w->sock_fd, resp, names_buf, (uint32_t)names_len, out_cap);
+    bool ok = send_resp(w->sock_fd, resp, names_buf, (uint32_t)names_len, out_cap);
+    free(names_buf);
+    return ok;
 #else
     return send_err(w->sock_fd, KMTL_ERR_UNSUPP, "Vulkan backend built without AIR metallib support", out_cap);
 #endif
@@ -3639,6 +4126,7 @@ static bool handle_rpc(worker_t *w,
           .max_workgroup_memory = w->props.limits.maxComputeSharedMemorySize,
           .subgroup_ops = w->subgroup_ops,
           .subgroup_size = w->subgroup_size,
+          .ssbo_offset_align = (uint32_t)w->staging_align,
       };
       air2spv_result_t ar = {0};
       if (!compile_metallib_sandboxed(w, lib->binary, lib->binary_len, fn_name, &caps, &ar, err, sizeof(err))) {
@@ -3847,6 +4335,7 @@ static bool handle_rpc(worker_t *w,
     p->binding_mask = fn->binding_mask;
     p->readonly_mask = fn->readonly_mask;
     p->max_tg = max_tg;
+    p->is_binary = fn->is_binary;
     p->consts = consts_copy;
     p->num_consts = fn->num_consts;
     p->num_specs = 0;
@@ -3929,6 +4418,10 @@ static bool handle_rpc(worker_t *w,
         send_err(w->sock_fd, KMTL_ERR_GPU, "vkWaitForFences failed or timed out", out_cap);
         return false;
       }
+    }
+    if (!flush_gpu_dirty_buffers(w, req->client_id)) {
+      send_err(w->sock_fd, KMTL_ERR_GPU, "vkWaitForFences failed or timed out", out_cap);
+      return false;
     }
     struct kmtl_resp_hdr resp = {0};
     resp.status = KMTL_OK;

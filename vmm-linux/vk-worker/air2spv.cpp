@@ -150,6 +150,18 @@ struct PtrInfo {
   uint32_t byte_off_id = 0;   /* SPIR-V u32 SSA ID for byte offset from base */
   uint32_t idx_id = 0;        /* Optional deferred scaled element index (0 = none) */
   uint32_t idx_scale = 0;     /* Byte stride for idx_id */
+  uint32_t sel_cond_id = 0;   /* Optional SPIR-V bool SSA ID for two-root pointer select */
+  PtrKind alt_kind = PtrKind::Invalid;
+  uint32_t alt_base_id = 0;
+  uint32_t alt_byte_off_id = 0;
+
+  bool is_dual() const { return sel_cond_id != 0; }
+  PtrInfo primary_arm() const {
+    return PtrInfo{kind, base_id, byte_off_id, idx_id, idx_scale, 0, PtrKind::Invalid, 0, 0};
+  }
+  PtrInfo alt_arm() const {
+    return PtrInfo{alt_kind, alt_base_id, alt_byte_off_id, idx_id, idx_scale, 0, PtrKind::Invalid, 0, 0};
+  }
 };
 
 struct KernelArgMeta {
@@ -527,6 +539,7 @@ struct SpvEmitter {
     if (ty->isVoidTy()) result = get_void();
     else if (ty->isIntegerTy(1)) result = get_bool();
     else if (ty->isIntegerTy()) result = get_int(ty->getIntegerBitWidth());
+    else if (ty->isBFloatTy()) result = get_int(16);
     else if (ty->isHalfTy()) result = get_float(16);
     else if (ty->isFloatTy()) result = get_float(32);
     else if (auto *vt = llvm::dyn_cast<llvm::FixedVectorType>(ty)) {
@@ -615,6 +628,11 @@ struct SpvEmitter {
     }
     if (auto *cf = llvm::dyn_cast<llvm::ConstantFP>(c)) {
       llvm::APInt bits = cf->getValueAPF().bitcastToAPInt();
+      if (ty->isBFloatTy()) {
+        uint32_t id = get_const_int(16, bits.getZExtValue());
+        if (id) const_memo[c] = id;
+        return id;
+      }
       if (ty->isHalfTy()) {
         uint32_t id = get_const_fp_bits(16, bits.getZExtValue());
         if (id) const_memo[c] = id;
@@ -771,39 +789,37 @@ struct SpvEmitter {
     return pc_var_id;
   }
 
-  uint32_t get_sg32_scratch(bool is_fp, uint32_t *out_elem_ptr_ty) {
-    if (is_fp) {
-      if (!sg32_f32_var) {
-        uint32_t f32 = get_float(32);
-        uint32_t arr_ty = get_array(f32, 64u);
-        uint32_t ptr_arr = get_ptr(spv::StorageClassWorkgroup, arr_ty);
-        sg32_f32_ptr_ty = get_ptr(spv::StorageClassWorkgroup, f32);
-        sg32_f32_var = alloc_id();
-        emit_op(types_consts_vars, spv::OpVariable,
-                {ptr_arr, sg32_f32_var, static_cast<uint32_t>(spv::StorageClassWorkgroup)});
-        interface_vars.push_back(sg32_f32_var);
+  uint32_t get_sg32_scratch_u32(uint32_t &wg_bytes_used, uint32_t max_wg, uint32_t *out_elem_ptr_ty) {
+    if (!sg32_u32_var) {
+      const uint32_t need = 64u * 4u;
+      if (need > max_wg || wg_bytes_used > max_wg - need) {
+        fail("simdgroup emulation scratch exceeds device threadgroup memory limit");
+        return 0;
       }
-      *out_elem_ptr_ty = sg32_f32_ptr_ty;
-      return sg32_f32_var;
-    } else {
-      if (!sg32_u32_var) {
-        uint32_t u32 = get_int(32);
-        uint32_t arr_ty = get_array(u32, 64u);
-        uint32_t ptr_arr = get_ptr(spv::StorageClassWorkgroup, arr_ty);
-        sg32_u32_ptr_ty = get_ptr(spv::StorageClassWorkgroup, u32);
-        sg32_u32_var = alloc_id();
-        emit_op(types_consts_vars, spv::OpVariable,
-                {ptr_arr, sg32_u32_var, static_cast<uint32_t>(spv::StorageClassWorkgroup)});
-        interface_vars.push_back(sg32_u32_var);
-      }
-      *out_elem_ptr_ty = sg32_u32_ptr_ty;
-      return sg32_u32_var;
+      wg_bytes_used += need;
+      uint32_t u32 = get_int(32);
+      uint32_t arr_ty = get_array(u32, 64u);
+      uint32_t ptr_arr = get_ptr(spv::StorageClassWorkgroup, arr_ty);
+      sg32_u32_ptr_ty = get_ptr(spv::StorageClassWorkgroup, u32);
+      sg32_u32_var = alloc_id();
+      emit_op(types_consts_vars, spv::OpVariable,
+              {ptr_arr, sg32_u32_var, static_cast<uint32_t>(spv::StorageClassWorkgroup)});
+      interface_vars.push_back(sg32_u32_var);
     }
+    *out_elem_ptr_ty = sg32_u32_ptr_ty;
+    return sg32_u32_var;
   }
 
-  uint32_t get_sg32_shuf_scratch(bool is_fp, uint32_t *out_elem_ptr_ty) {
+  uint32_t get_sg32_shuf_scratch(bool is_fp, uint32_t &wg_bytes_used, uint32_t max_wg,
+                                 uint32_t *out_elem_ptr_ty) {
+    const uint32_t need = 1024u * 4u;
     if (is_fp) {
       if (!sg32_shuf_f32_var) {
+        if (need > max_wg || wg_bytes_used > max_wg - need) {
+          fail("simdgroup shuffle scratch exceeds device threadgroup memory limit");
+          return 0;
+        }
+        wg_bytes_used += need;
         uint32_t f32 = get_float(32);
         uint32_t arr_ty = get_array(f32, 1024u);
         uint32_t ptr_arr = get_ptr(spv::StorageClassWorkgroup, arr_ty);
@@ -817,6 +833,11 @@ struct SpvEmitter {
       return sg32_shuf_f32_var;
     } else {
       if (!sg32_shuf_u32_var) {
+        if (need > max_wg || wg_bytes_used > max_wg - need) {
+          fail("simdgroup shuffle scratch exceeds device threadgroup memory limit");
+          return 0;
+        }
+        wg_bytes_used += need;
         uint32_t u32 = get_int(32);
         uint32_t arr_ty = get_array(u32, 1024u);
         uint32_t ptr_arr = get_ptr(spv::StorageClassWorkgroup, arr_ty);
@@ -856,8 +877,11 @@ struct Compiler {
   std::unordered_map<BuiltinKind, uint32_t> builtin_vars;
 
   std::unordered_map<const llvm::BasicBlock *, uint32_t> bb_label;
+  std::unordered_map<const llvm::BasicBlock *, uint32_t> bb_exit_label;
   std::unordered_map<const llvm::BasicBlock *, MergeInfo> merges;
   std::unordered_set<const llvm::BasicBlock *> continue_latches;
+  const llvm::BasicBlock *cur_bb = nullptr;
+  uint32_t cur_exit_label = 0;
 
   std::unordered_map<const llvm::Value *, uint32_t> val_map;
   std::unordered_map<const llvm::Value *, PtrInfo> ptr_map;
@@ -879,6 +903,7 @@ struct Compiler {
   using TraceCache = std::unordered_map<const llvm::Value *, TraceEntry>;
 
   std::vector<uint32_t> cur_body;
+  uint32_t buf_sub_off_ids[16] = {0};
   uint32_t wg_bytes_used = 0;
   uint32_t alloca_bytes_used = 0;
 
@@ -1034,7 +1059,7 @@ struct Compiler {
           if (!bty) return false;
           spv.emit_op(spv.types_consts_vars, spv::OpSpecConstantFalse, {bty, sid});
           is_air_bool = vty->isIntegerTy(8);
-        } else if (vty->isIntegerTy() || vty->isFloatTy() || vty->isHalfTy()) {
+        } else if (vty->isIntegerTy() || vty->isFloatTy() || vty->isHalfTy() || vty->isBFloatTy()) {
           uint32_t spv_ty = spv.map_llvm_type(vty);
           if (!spv_ty) return false;
           if (vty->isIntegerTy(64)) {
@@ -1064,7 +1089,8 @@ struct Compiler {
             auto *src_gv = llvm::dyn_cast<llvm::GlobalVariable>(li->getPointerOperand()->stripPointerCasts());
             if (!src_gv) continue;
             auto fit = fc_map.find(src_gv);
-            if (fit != fc_map.end() && !fc_map.count(dst_gv)) {
+            if (fit != fc_map.end() && !fc_map.count(dst_gv) &&
+                dst_gv->getValueType() == src_gv->getValueType()) {
               fc_map[dst_gv] = fit->second;
             }
           }
@@ -1262,6 +1288,112 @@ struct Compiler {
     return trace_ptr_root_impl(v, out_kind, out_base, cache, 0, steps) == TraceRes::Resolved;
   }
 
+  /* Collect all memory roots reachable from a pointer expression, including two-root selects. */
+  bool collect_ptr_roots(const llvm::Value *v,
+                         std::vector<std::pair<PtrKind, uint32_t>> &out) const {
+    out.clear();
+    std::unordered_set<const llvm::Value *> visited;
+    std::vector<const llvm::Value *> work;
+    work.push_back(v);
+    size_t steps = 0;
+    auto is_nullish = [](const llvm::Value *x) {
+      return llvm::isa<llvm::ConstantPointerNull>(x) || llvm::isa<llvm::UndefValue>(x) ||
+             llvm::isa<llvm::PoisonValue>(x);
+    };
+    auto add_root = [&](PtrKind k, uint32_t b) {
+      for (const auto &e : out) {
+        if (e.first == k && e.second == b) return;
+      }
+      out.push_back({k, b});
+    };
+    while (!work.empty()) {
+      const llvm::Value *cur = work.back();
+      work.pop_back();
+      if (!cur || ++steps > 4096) return false;
+      if (is_nullish(cur)) continue;
+      if (!visited.insert(cur).second) continue;
+
+      if (auto *arg = llvm::dyn_cast<llvm::Argument>(cur)) {
+        unsigned idx = arg->getArgNo();
+        if (idx >= arg_meta.size() || !arg_meta[idx].is_buffer) return false;
+        const KernelArgMeta &am = arg_meta[idx];
+        if (am.addr_space == 1 || am.addr_space == 2) {
+          add_root(PtrKind::Buffer, am.slot);
+          continue;
+        }
+        if (am.addr_space == 3) {
+          auto it = wg_arg_map.find(arg);
+          if (it == wg_arg_map.end()) return false;
+          add_root(PtrKind::Workgroup, it->second);
+          continue;
+        }
+        return false;
+      }
+      if (auto *gv = llvm::dyn_cast<llvm::GlobalVariable>(cur)) {
+        if (auto it = fc_map.find(gv); it != fc_map.end()) {
+          add_root(PtrKind::FuncConst, it->second.spec_id);
+          continue;
+        }
+        if (auto it = wg_gv_map.find(gv); it != wg_gv_map.end()) {
+          add_root(PtrKind::Workgroup, it->second);
+          continue;
+        }
+        return false;
+      }
+      if (auto *ai = llvm::dyn_cast<llvm::AllocaInst>(cur)) {
+        auto it = alloca_map.find(ai);
+        if (it == alloca_map.end()) return false;
+        add_root(PtrKind::Function, it->second);
+        continue;
+      }
+      if (auto *gep = llvm::dyn_cast<llvm::GEPOperator>(cur)) {
+        work.push_back(gep->getPointerOperand());
+        continue;
+      }
+      if (auto *bc = llvm::dyn_cast<llvm::BitCastOperator>(cur)) {
+        work.push_back(bc->getOperand(0));
+        continue;
+      }
+      if (auto *asc = llvm::dyn_cast<llvm::AddrSpaceCastOperator>(cur)) {
+        work.push_back(asc->getOperand(0));
+        continue;
+      }
+      if (auto *fi = llvm::dyn_cast<llvm::FreezeInst>(cur)) {
+        work.push_back(fi->getOperand(0));
+        continue;
+      }
+      if (auto *phi = llvm::dyn_cast<llvm::PHINode>(cur)) {
+        for (unsigned i = 0; i < phi->getNumIncomingValues(); i++) {
+          work.push_back(phi->getIncomingValue(i));
+        }
+        continue;
+      }
+      if (auto *sel = llvm::dyn_cast<llvm::SelectInst>(cur)) {
+        work.push_back(sel->getFalseValue());
+        work.push_back(sel->getTrueValue());
+        continue;
+      }
+      if (auto *li = llvm::dyn_cast<llvm::LoadInst>(cur)) {
+        if (li->getType()->isPointerTy()) {
+          TraceCache tmp_cache;
+          PtrKind pk = PtrKind::Invalid;
+          uint32_t pb = 0;
+          if (trace_ptr_root(li->getPointerOperand(), pk, pb, tmp_cache) &&
+              pk == PtrKind::Function) {
+            auto it = ptr_alloca_roots.find(pb);
+            if (it != ptr_alloca_roots.end()) {
+              add_root(it->second.first, it->second.second);
+              continue;
+            }
+          }
+        }
+        return false;
+      }
+      return false;
+    }
+    return !out.empty();
+  }
+
   void record_access_type_impl(BufferBinding &bb, llvm::Type *ty, bool is_store, bool is_atomic,
                                std::unordered_set<const llvm::Type *> &seen, int depth) {
     if (!ty || depth > 16) {
@@ -1293,6 +1425,11 @@ struct Compiler {
     if (is_atomic) bb.has_atomic = true;
     llvm::Type *scalar = ty->getScalarType();
     if (scalar->isHalfTy()) {
+      bb.all_f32 = false;
+      bb.min_access_bytes = std::min(bb.min_access_bytes, 2u);
+      if (is_store) bb.min_store_bytes = std::min(bb.min_store_bytes, 2u);
+    } else if (scalar->isBFloatTy()) {
+      bb.all_half = false;
       bb.all_f32 = false;
       bb.min_access_bytes = std::min(bb.min_access_bytes, 2u);
       if (is_store) bb.min_store_bytes = std::min(bb.min_store_bytes, 2u);
@@ -1418,6 +1555,25 @@ struct Compiler {
         TraceCache pt_cache;
         for (llvm::BasicBlock &bb : fn) {
           for (llvm::Instruction &inst : bb) {
+            if (auto *ci = llvm::dyn_cast<llvm::CallInst>(&inst)) {
+              llvm::Function *callee = ci->getCalledFunction();
+              if (callee) {
+                llvm::StringRef cname = callee->getName();
+                if ((cname.starts_with("llvm.memcpy.") || cname.starts_with("llvm.memmove.") ||
+                     cname.starts_with("llvm.memset.")) && ci->arg_size() >= 1) {
+                  PtrKind dst_k = PtrKind::Invalid;
+                  uint32_t dst_b = 0;
+                  if (trace_ptr_root(ci->getArgOperand(0), dst_k, dst_b, pt_cache) &&
+                      dst_k == PtrKind::Function && !poisoned.count(dst_b)) {
+                    poisoned.insert(dst_b);
+                    cand.erase(dst_b);
+                    ptr_alloca_roots.erase(dst_b);
+                    changed = true;
+                  }
+                }
+              }
+              continue;
+            }
             auto *si = llvm::dyn_cast<llvm::StoreInst>(&inst);
             if (!si || !si->getValueOperand()->getType()->isPointerTy()) continue;
             PtrKind dst_k = PtrKind::Invalid;
@@ -1459,45 +1615,64 @@ struct Compiler {
       }
     }
 
-    /* 4. Pre-scan all memory ops to select optimal race-free backing element types. */
+    /* 4. Pre-scan all memory ops to select optimal race-free backing element types and readonly masks. */
     std::vector<BufferBinding> wg_stats(wg_arrays.size());
     std::vector<BufferBinding> fn_stats(fn_arrays.size());
-    TraceCache trace_cache;
+    std::vector<std::pair<PtrKind, uint32_t>> roots;
+    auto record_ptr_access = [&](const llvm::Value *ptr, llvm::Type *acc_ty, bool is_store,
+                                 bool is_atomic) {
+      if (!ptr || !acc_ty) return;
+      if (acc_ty->isPointerTy()) acc_ty = llvm::Type::getInt32Ty(mod.getContext());
+      if (!collect_ptr_roots(ptr, roots)) {
+        if (is_store) {
+          /* Conservatively mark all used buffers writable if any store target is unresolvable. */
+          for (uint32_t s = 0; s < kMaxBufferSlots; s++) {
+            if (buffers[s].used) buffers[s].has_store = true;
+          }
+        }
+        return;
+      }
+      for (const auto &rb : roots) {
+        if (rb.first == PtrKind::Buffer && rb.second < kMaxBufferSlots) {
+          record_access_type(buffers[rb.second], acc_ty, is_store, is_atomic);
+        } else if (rb.first == PtrKind::Workgroup && rb.second < wg_stats.size()) {
+          record_access_type(wg_stats[rb.second], acc_ty, is_store, is_atomic);
+        } else if (rb.first == PtrKind::Function && rb.second < fn_stats.size()) {
+          record_access_type(fn_stats[rb.second], acc_ty, is_store, is_atomic);
+        }
+      }
+    };
+    llvm::Type *i8_ty = llvm::Type::getInt8Ty(mod.getContext());
+    llvm::Type *i32_ty = llvm::Type::getInt32Ty(mod.getContext());
     for (llvm::BasicBlock &bb : fn) {
       for (llvm::Instruction &inst : bb) {
-        const llvm::Value *ptr = nullptr;
-        llvm::Type *acc_ty = nullptr;
-        bool is_store = false;
-        bool is_atomic = false;
         if (auto *li = llvm::dyn_cast<llvm::LoadInst>(&inst)) {
-          ptr = li->getPointerOperand();
-          acc_ty = li->getType();
+          record_ptr_access(li->getPointerOperand(), li->getType(), false, false);
         } else if (auto *si = llvm::dyn_cast<llvm::StoreInst>(&inst)) {
-          ptr = si->getPointerOperand();
-          acc_ty = si->getValueOperand()->getType();
-          is_store = true;
+          record_ptr_access(si->getPointerOperand(), si->getValueOperand()->getType(), true, false);
         } else if (auto *rmw = llvm::dyn_cast<llvm::AtomicRMWInst>(&inst)) {
-          ptr = rmw->getPointerOperand();
-          acc_ty = rmw->getValOperand()->getType();
-          is_store = true;
-          is_atomic = true;
+          record_ptr_access(rmw->getPointerOperand(), rmw->getValOperand()->getType(), true, true);
         } else if (auto *cx = llvm::dyn_cast<llvm::AtomicCmpXchgInst>(&inst)) {
-          ptr = cx->getPointerOperand();
-          acc_ty = cx->getCompareOperand()->getType();
-          is_store = true;
-          is_atomic = true;
-        }
-        if (!ptr || !acc_ty) continue;
-        if (acc_ty->isPointerTy()) acc_ty = llvm::Type::getInt32Ty(mod.getContext());
-        PtrKind pk = PtrKind::Invalid;
-        uint32_t base = 0;
-        if (!trace_ptr_root(ptr, pk, base, trace_cache)) continue;
-        if (pk == PtrKind::Buffer && base < kMaxBufferSlots) {
-          record_access_type(buffers[base], acc_ty, is_store, is_atomic);
-        } else if (pk == PtrKind::Workgroup && base < wg_stats.size()) {
-          record_access_type(wg_stats[base], acc_ty, is_store, is_atomic);
-        } else if (pk == PtrKind::Function && base < fn_stats.size()) {
-          record_access_type(fn_stats[base], acc_ty, is_store, is_atomic);
+          record_ptr_access(cx->getPointerOperand(), cx->getCompareOperand()->getType(), true, true);
+        } else if (auto *ci = llvm::dyn_cast<llvm::CallInst>(&inst)) {
+          llvm::Function *callee = ci->getCalledFunction();
+          if (!callee) continue;
+          llvm::StringRef cname = callee->getName();
+          if (cname.starts_with("llvm.memset.") && ci->arg_size() >= 3) {
+            auto *len_c = llvm::dyn_cast<llvm::ConstantInt>(ci->getArgOperand(2));
+            uint64_t nbytes = 0;
+            bool byte_gran = !len_c || !try_get_u64(len_c, nbytes) || (nbytes & 3u) != 0 ||
+                             !llvm::isa<llvm::ConstantInt>(ci->getArgOperand(1));
+            record_ptr_access(ci->getArgOperand(0), byte_gran ? i8_ty : i32_ty, true, false);
+          } else if ((cname.starts_with("llvm.memcpy.") || cname.starts_with("llvm.memmove.")) &&
+                     ci->arg_size() >= 3) {
+            auto *len_c = llvm::dyn_cast<llvm::ConstantInt>(ci->getArgOperand(2));
+            uint64_t nbytes = 0;
+            bool byte_gran = !len_c || !try_get_u64(len_c, nbytes) || (nbytes & 3u) != 0;
+            llvm::Type *mty = byte_gran ? i8_ty : i32_ty;
+            record_ptr_access(ci->getArgOperand(0), mty, true, false);
+            record_ptr_access(ci->getArgOperand(1), mty, false, false);
+          }
         }
       }
     }
@@ -1522,7 +1697,8 @@ struct Compiler {
 
     for (uint32_t s = 0; s < kMaxBufferSlots; s++) {
       if (!buffers[s].used) continue;
-      if (buffers[s].has_store) buffers[s].readonly = false;
+      /* Infer NonWritable directly from post-inlining stores/atomics/mem-intrinsics. */
+      buffers[s].readonly = !buffers[s].has_store;
       buffers[s].elem = pick_elem(buffers[s], true);
       buffers[s].var_id = spv.make_ssbo_var(s, buffers[s].elem, buffers[s].readonly,
                                             &buffers[s].ptr_elem_ty);
@@ -1734,21 +1910,80 @@ struct Compiler {
     return sized_id;
   }
 
+  static bool is_zero_ext_u32(const llvm::Value *v) {
+    if (!v) return false;
+    if (auto *ci = llvm::dyn_cast<llvm::ConstantInt>(v)) {
+      return ci->getBitWidth() <= 64 && ci->getZExtValue() <= 0xFFFFFFFFULL;
+    }
+    if (auto *z = llvm::dyn_cast<llvm::ZExtInst>(v)) {
+      return z->getOperand(0)->getType()->isIntegerTy() &&
+             z->getOperand(0)->getType()->getIntegerBitWidth() <= 32;
+    }
+    if (auto *bo = llvm::dyn_cast<llvm::BinaryOperator>(v)) {
+      if (bo->getOpcode() == llvm::Instruction::And) {
+        if (auto *c = llvm::dyn_cast<llvm::ConstantInt>(bo->getOperand(1))) {
+          return c->getBitWidth() <= 64 && c->getZExtValue() <= 0xFFFFFFFFULL;
+        }
+        if (auto *c = llvm::dyn_cast<llvm::ConstantInt>(bo->getOperand(0))) {
+          return c->getBitWidth() <= 64 && c->getZExtValue() <= 0xFFFFFFFFULL;
+        }
+      }
+    }
+    return false;
+  }
+
+  static llvm::Value *match_sext32_in_i64(const llvm::Instruction *inst) {
+    auto *bo = llvm::dyn_cast<llvm::BinaryOperator>(inst);
+    if (!bo || bo->getOpcode() != llvm::Instruction::AShr) return nullptr;
+    auto *c2 = llvm::dyn_cast<llvm::ConstantInt>(bo->getOperand(1));
+    uint64_t sh2 = 0;
+    if (!c2 || !try_get_u64(c2, sh2) || sh2 != 32u) return nullptr;
+    auto *shl = llvm::dyn_cast<llvm::BinaryOperator>(bo->getOperand(0));
+    if (!shl || shl->getOpcode() != llvm::Instruction::Shl) return nullptr;
+    auto *c1 = llvm::dyn_cast<llvm::ConstantInt>(shl->getOperand(1));
+    uint64_t sh1 = 0;
+    if (!c1 || !try_get_u64(c1, sh1) || sh1 != 32u) return nullptr;
+    return shl->getOperand(0);
+  }
+
+  static bool match_magic_div_lshr(const llvm::Instruction *inst,
+                                   llvm::Value *&mul_a,
+                                   llvm::Value *&mul_b,
+                                   uint32_t &shift_k) {
+    auto *bo = llvm::dyn_cast<llvm::BinaryOperator>(inst);
+    if (!bo || bo->getOpcode() != llvm::Instruction::LShr) return false;
+    auto *shc = llvm::dyn_cast<llvm::ConstantInt>(bo->getOperand(1));
+    uint64_t shv = 0;
+    if (!shc || !try_get_u64(shc, shv) || shv < 32u || shv >= 64u) return false;
+    auto *mul = llvm::dyn_cast<llvm::BinaryOperator>(bo->getOperand(0));
+    if (!mul || mul->getOpcode() != llvm::Instruction::Mul) return false;
+    if (!is_zero_ext_u32(mul->getOperand(0)) || !is_zero_ext_u32(mul->getOperand(1))) return false;
+    mul_a = mul->getOperand(0);
+    mul_b = mul->getOperand(1);
+    shift_k = static_cast<uint32_t>(shv);
+    return true;
+  }
+
   /* Precompute the globally consistent greatest fixed point of i64 index-only instructions
      so narrowed i64 values never leak a u32 SSA ID into an un-narrowed i64 instruction. */
   void compute_narrowed_i64_set(const std::vector<llvm::BasicBlock *> &order) {
     narrowed_i64_set.clear();
     std::unordered_set<const llvm::BasicBlock *> reachable(order.begin(), order.end());
     std::vector<const llvm::Instruction *> cands;
+    std::unordered_set<const llvm::Value *> ptr_hi_tainted;
     for (llvm::BasicBlock *bb : order) {
       for (llvm::Instruction &inst : *bb) {
         if (!inst.getType()->isIntegerTy(64) || inst.use_empty()) continue;
         bool ok = llvm::isa<llvm::ZExtInst>(&inst) || llvm::isa<llvm::SExtInst>(&inst) ||
                   llvm::isa<llvm::PHINode>(&inst) || llvm::isa<llvm::SelectInst>(&inst);
+        if (!spv.hw_caps.has_int64 && llvm::isa<llvm::PtrToIntInst>(&inst)) {
+          ok = true;
+          ptr_hi_tainted.insert(&inst);
+        }
         if (!spv.hw_caps.has_int64 && llvm::isa<llvm::LoadInst>(&inst)) {
           auto *li = llvm::cast<llvm::LoadInst>(&inst);
-          if (!llvm::isa<llvm::GlobalVariable>(li->getPointerOperand()) ||
-              !fc_map.count(llvm::cast<llvm::GlobalVariable>(li->getPointerOperand()))) {
+          auto *gv = llvm::dyn_cast<llvm::GlobalVariable>(li->getPointerOperand()->stripPointerCasts());
+          if (!gv || !fc_map.count(gv)) {
             ok = true;
           }
         }
@@ -1757,13 +1992,54 @@ struct Compiler {
           case llvm::Instruction::Add:
           case llvm::Instruction::Sub:
           case llvm::Instruction::Mul:
-          case llvm::Instruction::Shl:
-          case llvm::Instruction::LShr:
           case llvm::Instruction::Or:
           case llvm::Instruction::And:
             ok = true;
             break;
-          case llvm::Instruction::AShr:
+          case llvm::Instruction::Shl: {
+            auto *shc = llvm::dyn_cast<llvm::ConstantInt>(bo->getOperand(1));
+            uint64_t shv = 0;
+            if (shc && try_get_u64(shc, shv)) {
+              if (shv < 32u) {
+                ok = true;
+              } else if (shv == 32u) {
+                bool only_sext32 = true;
+                for (const llvm::User *u : bo->users()) {
+                  auto *ui = llvm::dyn_cast<llvm::Instruction>(u);
+                  if (!ui || !reachable.count(ui->getParent())) continue;
+                  if (!match_sext32_in_i64(ui)) { only_sext32 = false; break; }
+                }
+                if (only_sext32) ok = true;
+              }
+            }
+            break;
+          }
+          case llvm::Instruction::LShr: {
+            auto *shc = llvm::dyn_cast<llvm::ConstantInt>(bo->getOperand(1));
+            uint64_t shv = 0;
+            llvm::Value *ma = nullptr, *mb = nullptr;
+            uint32_t mk = 0;
+            if (!spv.hw_caps.has_int64 && match_magic_div_lshr(bo, ma, mb, mk)) {
+              ok = true;
+            } else if (shc && try_get_u64(shc, shv) && shv < 32u &&
+                       (is_zero_ext_u32(bo->getOperand(0)) ||
+                        (!spv.hw_caps.has_int64 && llvm::isa<llvm::LoadInst>(bo->getOperand(0))))) {
+              ok = true;
+            }
+            break;
+          }
+          case llvm::Instruction::AShr: {
+            auto *shc = llvm::dyn_cast<llvm::ConstantInt>(bo->getOperand(1));
+            uint64_t shv = 0;
+            if (match_sext32_in_i64(bo)) {
+              ok = true;
+            } else if (!spv.hw_caps.has_int64 && shc && try_get_u64(shc, shv) && shv < 32u &&
+                       (llvm::isa<llvm::SExtInst>(bo->getOperand(0)) ||
+                        llvm::isa<llvm::LoadInst>(bo->getOperand(0)))) {
+              ok = true;
+            }
+            break;
+          }
           case llvm::Instruction::UDiv:
           case llvm::Instruction::SDiv:
           case llvm::Instruction::URem:
@@ -1777,6 +2053,34 @@ struct Compiler {
         if (ok) {
           narrowed_i64_set.insert(&inst);
           cands.push_back(&inst);
+        }
+      }
+    }
+
+    /* Propagate ptrtoint upper-32-bit taint; only And with <= 0xFFFFFFFF clears upper bits. */
+    if (!ptr_hi_tainted.empty()) {
+      bool tchanged = true;
+      while (tchanged) {
+        tchanged = false;
+        for (const llvm::Instruction *inst : cands) {
+          if (ptr_hi_tainted.count(inst)) continue;
+          if (auto *bo = llvm::dyn_cast<llvm::BinaryOperator>(inst)) {
+            if (bo->getOpcode() == llvm::Instruction::And) {
+              auto *c0 = llvm::dyn_cast<llvm::ConstantInt>(bo->getOperand(0));
+              auto *c1 = llvm::dyn_cast<llvm::ConstantInt>(bo->getOperand(1));
+              if ((c0 && c0->getBitWidth() <= 64 && c0->getZExtValue() <= 0xFFFFFFFFULL) ||
+                  (c1 && c1->getBitWidth() <= 64 && c1->getZExtValue() <= 0xFFFFFFFFULL)) {
+                continue;
+              }
+            }
+          }
+          for (const llvm::Value *op : inst->operands()) {
+            if (ptr_hi_tainted.count(op)) {
+              ptr_hi_tainted.insert(inst);
+              tchanged = true;
+              break;
+            }
+          }
         }
       }
     }
@@ -1818,6 +2122,11 @@ struct Compiler {
               if (tr->getType()->getIntegerBitWidth() > 32) { keep = false; break; }
             } else if (auto *ic = llvm::dyn_cast<llvm::ICmpInst>(usr)) {
               if (spv.hw_caps.has_int64) { keep = false; break; }
+              if (ptr_hi_tainted.count(ic->getOperand(0)) ||
+                  ptr_hi_tainted.count(ic->getOperand(1))) {
+                keep = false;
+                break;
+              }
               auto ok_op = [&](const llvm::Value *v) {
                 return narrowed_i64_set.count(v) || llvm::isa<llvm::ConstantInt>(v) ||
                        llvm::isa<llvm::UndefValue>(v) || llvm::isa<llvm::PoisonValue>(v);
@@ -1844,7 +2153,58 @@ struct Compiler {
   }
 
   /* Materialize a single i64 index-only instruction in-place as u32 (O(1), dominance-safe). */
+  uint32_t emit_buf_pc_base_off(uint32_t slot) {
+    uint32_t raw = emit_pc_load(1u, slot);
+    if (slot < 16u && buf_sub_off_ids[slot] != 0) {
+      uint32_t mask = ~(spv.hw_caps.ssbo_offset_align - 1u);
+      uint32_t aligned = spv.alloc_id();
+      spv.emit_op(cur_body, spv::OpBitwiseAnd,
+                  {spv.get_int(32), aligned, raw, spv.get_const_u32(mask)});
+      return aligned;
+    }
+    return raw;
+  }
+
+  bool emit_ptr_to_u32_pair(llvm::Value *src_v, uint32_t &off32, uint32_t &hi32) {
+    uint32_t u32 = spv.get_int(32);
+    off32 = spv.get_const_u32(0u);
+    hi32 = spv.get_const_u32(0u);
+    if (llvm::isa<llvm::ConstantPointerNull>(src_v) ||
+        llvm::isa<llvm::UndefValue>(src_v) || llvm::isa<llvm::PoisonValue>(src_v)) {
+      return true;
+    }
+    PtrInfo p = resolve_ptr(src_v);
+    if (p.kind == PtrKind::Invalid || p.is_dual()) {
+      return spv.fail("unsupported ptrtoint pointer operand");
+    }
+    off32 = materialize_byte_off(p);
+    if (p.kind == PtrKind::Buffer && p.base_id < 16u) {
+      hi32 = emit_pc_load(0u, p.base_id);
+      off32 = emit_u32_add(emit_buf_pc_base_off(p.base_id), off32);
+    } else if (p.kind == PtrKind::Workgroup) {
+      hi32 = spv.get_const_u32(0x40000000u | p.base_id);
+    } else if (p.kind == PtrKind::Function) {
+      hi32 = spv.get_const_u32(0x20000000u | p.base_id);
+    }
+    uint32_t is_null = get_ptr_is_null(src_v);
+    if (is_null != spv.get_const_bool(false)) {
+      uint32_t z32 = spv.get_const_u32(0u);
+      uint32_t sel_lo = spv.alloc_id();
+      spv.emit_op(cur_body, spv::OpSelect, {u32, sel_lo, is_null, z32, off32});
+      uint32_t sel_hi = spv.alloc_id();
+      spv.emit_op(cur_body, spv::OpSelect, {u32, sel_hi, is_null, z32, hi32});
+      off32 = sel_lo;
+      hi32 = sel_hi;
+    }
+    return spv.error.empty();
+  }
+
   uint32_t materialize_narrowed_i64(llvm::Instruction *inst) {
+    if (auto *p2i = llvm::dyn_cast<llvm::PtrToIntInst>(inst)) {
+      uint32_t off32 = 0, hi32 = 0;
+      if (!emit_ptr_to_u32_pair(p2i->getOperand(0), off32, hi32)) return 0;
+      return off32;
+    }
     if (auto *li = llvm::dyn_cast<llvm::LoadInst>(inst)) {
       PtrInfo ptr = resolve_ptr(li->getPointerOperand());
       if (ptr.kind == PtrKind::Invalid || ptr.kind == PtrKind::FuncConst) {
@@ -1885,6 +2245,35 @@ struct Compiler {
       return r;
     }
     if (auto *bo = llvm::dyn_cast<llvm::BinaryOperator>(inst)) {
+      if (llvm::Value *inner = match_sext32_in_i64(bo)) {
+        return get_index_u32(inner);
+      }
+      if (bo->getOpcode() == llvm::Instruction::Shl) {
+        auto *shc = llvm::dyn_cast<llvm::ConstantInt>(bo->getOperand(1));
+        uint64_t shv = 0;
+        if (shc && try_get_u64(shc, shv) && shv >= 32u) {
+          return spv.get_const_u32(0u);
+        }
+      }
+      llvm::Value *ma = nullptr, *mb = nullptr;
+      uint32_t mk = 0;
+      if (match_magic_div_lshr(bo, ma, mb, mk)) {
+        uint32_t a32 = get_index_u32(ma);
+        uint32_t b32 = get_index_u32(mb);
+        if (!a32 || !b32) return 0;
+        uint32_t u32 = spv.get_int(32);
+        uint32_t pair_ty = spv.alloc_id();
+        spv.emit_op(spv.types_consts_vars, spv::OpTypeStruct, {pair_ty, u32, u32});
+        uint32_t ext = spv.alloc_id();
+        spv.emit_op(cur_body, spv::OpUMulExtended, {pair_ty, ext, a32, b32});
+        uint32_t hi = spv.alloc_id();
+        spv.emit_op(cur_body, spv::OpCompositeExtract, {u32, hi, ext, 1u});
+        if (mk == 32u) return hi;
+        uint32_t r = spv.alloc_id();
+        spv.emit_op(cur_body, spv::OpShiftRightLogical,
+                    {u32, r, hi, spv.get_const_u32(mk - 32u)});
+        return r;
+      }
       uint32_t a = get_index_u32(bo->getOperand(0));
       uint32_t b = get_index_u32(bo->getOperand(1));
       if (!a || !b) return 0;
@@ -2030,6 +2419,9 @@ struct Compiler {
         if (arg_meta[idx].addr_space == 1 || arg_meta[idx].addr_space == 2) {
           p.kind = PtrKind::Buffer;
           p.base_id = arg_meta[idx].slot;
+          if (p.base_id < 16u && buf_sub_off_ids[p.base_id] != 0) {
+            p.byte_off_id = buf_sub_off_ids[p.base_id];
+          }
         } else if (arg_meta[idx].addr_space == 3) {
           auto wit = wg_arg_map.find(arg);
           if (wit == wg_arg_map.end()) {
@@ -2088,7 +2480,7 @@ struct Compiler {
       PtrInfo base = resolve_ptr(gep->getPointerOperand(), depth + 1);
       if (base.kind == PtrKind::Invalid) return {};
       uint32_t z = spv.get_const_u32(0);
-      uint32_t off = (base.idx_id == 0) ? base.byte_off_id : materialize_byte_off(base);
+      uint32_t off = base.is_dual() ? z : ((base.idx_id == 0) ? base.byte_off_id : materialize_byte_off(base));
       uint32_t dyn_idx = 0;
       uint32_t dyn_scale = 0;
       llvm::Type *cur_ty = gep->getSourceElementType();
@@ -2198,16 +2590,41 @@ struct Compiler {
         }
         off = emit_u32_add(off, spv.get_const_u32(static_cast<uint32_t>(const_bytes)));
       }
-      /* Materialize deferred scaled index eagerly if fed to a pointer PHI (directly or via cast). */
+      if (base.is_dual()) {
+        if (dyn_idx != 0) {
+          off = emit_u32_add(off, emit_u32_mul_const(dyn_idx, dyn_scale));
+          dyn_idx = 0;
+          dyn_scale = 0;
+        }
+        uint32_t p_off = (off == z) ? base.byte_off_id : emit_u32_add(base.byte_off_id, off);
+        uint32_t a_off = (off == z) ? base.alt_byte_off_id : emit_u32_add(base.alt_byte_off_id, off);
+        PtrInfo res{base.kind, base.base_id, p_off, 0, 0,
+                    base.sel_cond_id, base.alt_kind, base.alt_base_id, a_off};
+        if (cacheable) ptr_map[v] = res;
+        return res;
+      }
+      /* Materialize deferred scaled index eagerly if fed to a pointer PHI (directly or via cast/freeze). */
       if (dyn_idx != 0 && llvm::isa<llvm::Instruction>(v)) {
-        for (const llvm::User *u : v->users()) {
-          if (llvm::isa<llvm::PHINode>(u) || llvm::isa<llvm::BitCastOperator>(u) ||
-              llvm::isa<llvm::AddrSpaceCastOperator>(u)) {
-            off = emit_u32_add(off, emit_u32_mul_const(dyn_idx, dyn_scale));
-            dyn_idx = 0;
-            dyn_scale = 0;
+        std::vector<const llvm::User *> ustack(v->user_begin(), v->user_end());
+        std::unordered_set<const llvm::User *> useen;
+        bool feeds_phi = false;
+        while (!ustack.empty() && useen.size() < 64u) {
+          const llvm::User *u = ustack.back();
+          ustack.pop_back();
+          if (!useen.insert(u).second) continue;
+          if (llvm::isa<llvm::PHINode>(u)) {
+            feeds_phi = true;
             break;
           }
+          if (llvm::isa<llvm::BitCastOperator>(u) || llvm::isa<llvm::AddrSpaceCastOperator>(u) ||
+              llvm::isa<llvm::FreezeInst>(u)) {
+            for (const llvm::User *nu : u->users()) ustack.push_back(nu);
+          }
+        }
+        if (feeds_phi) {
+          off = emit_u32_add(off, emit_u32_mul_const(dyn_idx, dyn_scale));
+          dyn_idx = 0;
+          dyn_scale = 0;
         }
       }
       PtrInfo res{base.kind, base.base_id, off, dyn_idx, dyn_scale};
@@ -2236,6 +2653,9 @@ struct Compiler {
         return llvm::isa<llvm::UndefValue>(x) || llvm::isa<llvm::PoisonValue>(x) ||
                llvm::isa<llvm::ConstantPointerNull>(x);
       };
+      auto is_mem_kind = [](PtrKind k) {
+        return k == PtrKind::Buffer || k == PtrKind::Workgroup || k == PtrKind::Function;
+      };
       bool tn = is_nullish(sel->getTrueValue());
       bool fn_null = is_nullish(sel->getFalseValue());
       if (tn && fn_null) {
@@ -2245,22 +2665,46 @@ struct Compiler {
       PtrInfo t = tn ? PtrInfo{} : resolve_ptr(sel->getTrueValue(), depth + 1);
       PtrInfo f = fn_null ? PtrInfo{} : resolve_ptr(sel->getFalseValue(), depth + 1);
       if (tn) {
-        if (f.kind == PtrKind::Invalid) return {};
+        if (f.kind == PtrKind::Invalid || f.is_dual()) {
+          spv.fail("nested multi-buffer pointer select not supported");
+          return {};
+        }
         t = PtrInfo{f.kind, f.base_id, spv.get_const_u32(0), 0, 0};
       } else if (fn_null) {
-        if (t.kind == PtrKind::Invalid) return {};
+        if (t.kind == PtrKind::Invalid || t.is_dual()) {
+          spv.fail("nested multi-buffer pointer select not supported");
+          return {};
+        }
         f = PtrInfo{t.kind, t.base_id, spv.get_const_u32(0), 0, 0};
-      } else if (t.kind == PtrKind::Invalid || t.kind != f.kind || t.base_id != f.base_id) {
-        spv.fail("select between pointers to different buffers not supported");
+      } else if (t.kind == PtrKind::Invalid || f.kind == PtrKind::Invalid) {
         return {};
       }
       uint32_t cond = get_val(sel->getCondition());
       if (!cond) return {};
-      uint32_t toff = materialize_byte_off(t);
-      uint32_t foff = materialize_byte_off(f);
-      uint32_t off = spv.alloc_id();
-      spv.emit_op(cur_body, spv::OpSelect, {spv.get_int(32), off, cond, toff, foff});
-      PtrInfo res{t.kind, t.base_id, off, 0, 0};
+      PtrInfo res;
+      if (!t.is_dual() && !f.is_dual() && t.kind == f.kind && t.base_id == f.base_id) {
+        uint32_t toff = materialize_byte_off(t);
+        uint32_t foff = materialize_byte_off(f);
+        uint32_t off = spv.alloc_id();
+        spv.emit_op(cur_body, spv::OpSelect, {spv.get_int(32), off, cond, toff, foff});
+        res = PtrInfo{t.kind, t.base_id, off, 0, 0};
+      } else if (!t.is_dual() && !f.is_dual() && is_mem_kind(t.kind) && is_mem_kind(f.kind)) {
+        uint32_t toff = materialize_byte_off(t);
+        uint32_t foff = materialize_byte_off(f);
+        auto root_key = [](PtrKind k, uint32_t b) {
+          return std::make_pair(static_cast<uint8_t>(k), b);
+        };
+        if (root_key(f.kind, f.base_id) < root_key(t.kind, t.base_id)) {
+          uint32_t not_c = spv.alloc_id();
+          spv.emit_op(cur_body, spv::OpLogicalNot, {spv.get_bool(), not_c, cond});
+          res = PtrInfo{f.kind, f.base_id, foff, 0, 0, not_c, t.kind, t.base_id, toff};
+        } else {
+          res = PtrInfo{t.kind, t.base_id, toff, 0, 0, cond, f.kind, f.base_id, foff};
+        }
+      } else {
+        spv.fail("select between incompatible pointers not supported");
+        return {};
+      }
       if (cacheable) {
         ptr_map[v] = res;
         uint32_t tnull = get_ptr_is_null(sel->getTrueValue());
@@ -2429,6 +2873,20 @@ struct Compiler {
         spv.emit_op(cur_body, spv::OpFConvert, {f16, h, flt});
         return h;
       }
+      if (elem == ElemKind::U8) {
+        uint32_t u16 = spv.get_int(16);
+        if (!u16) return 0;
+        uint32_t b0 = emit_raw_elem_load(base, byte_off);
+        uint32_t b1 = emit_raw_elem_load(base, emit_u32_add(byte_off, spv.get_const_u32(1)));
+        uint32_t lo = spv.alloc_id(), hi = spv.alloc_id(), hish = spv.alloc_id();
+        uint32_t u16v = spv.alloc_id(), h = spv.alloc_id();
+        spv.emit_op(cur_body, spv::OpUConvert, {u16, lo, b0});
+        spv.emit_op(cur_body, spv::OpUConvert, {u16, hi, b1});
+        spv.emit_op(cur_body, spv::OpShiftLeftLogical, {u16, hish, hi, spv.get_const_int(16, 8)});
+        spv.emit_op(cur_body, spv::OpBitwiseOr, {u16, u16v, lo, hish});
+        spv.emit_op(cur_body, spv::OpBitcast, {f16, h, u16v});
+        return h;
+      }
     }
 
     if (ty->isFloatTy() || ty->isIntegerTy(32)) {
@@ -2493,7 +2951,7 @@ struct Compiler {
       }
     }
 
-    if (ty->isIntegerTy(16)) {
+    if (ty->isIntegerTy(16) || ty->isBFloatTy()) {
       uint32_t u16 = spv.get_int(16);
       if (!u16) return 0;
       if (elem == ElemKind::U16) return emit_raw_elem_load(base, emit_u32_shr_const(byte_off, 1));
@@ -2503,13 +2961,28 @@ struct Compiler {
         spv.emit_op(cur_body, spv::OpBitcast, {u16, r, raw});
         return r;
       }
-      if (elem == ElemKind::U32) {
+      if (elem == ElemKind::U32 || elem == ElemKind::F32) {
         uint32_t w = emit_raw_elem_load(base, emit_u32_shr_const(byte_off, 2));
+        if (elem == ElemKind::F32) {
+          uint32_t wu = spv.alloc_id();
+          spv.emit_op(cur_body, spv::OpBitcast, {u32, wu, w});
+          w = wu;
+        }
         uint32_t bm = spv.alloc_id(), bo = spv.alloc_id(), ex = spv.alloc_id(), r = spv.alloc_id();
         spv.emit_op(cur_body, spv::OpBitwiseAnd, {u32, bm, byte_off, spv.get_const_u32(2)});
         spv.emit_op(cur_body, spv::OpShiftLeftLogical, {u32, bo, bm, spv.get_const_u32(3)});
         spv.emit_op(cur_body, spv::OpBitFieldUExtract, {u32, ex, w, bo, spv.get_const_u32(16)});
         spv.emit_op(cur_body, spv::OpUConvert, {u16, r, ex});
+        return r;
+      }
+      if (elem == ElemKind::U8) {
+        uint32_t b0 = emit_raw_elem_load(base, byte_off);
+        uint32_t b1 = emit_raw_elem_load(base, emit_u32_add(byte_off, spv.get_const_u32(1)));
+        uint32_t lo = spv.alloc_id(), hi = spv.alloc_id(), hish = spv.alloc_id(), r = spv.alloc_id();
+        spv.emit_op(cur_body, spv::OpUConvert, {u16, lo, b0});
+        spv.emit_op(cur_body, spv::OpUConvert, {u16, hi, b1});
+        spv.emit_op(cur_body, spv::OpShiftLeftLogical, {u16, hish, hi, spv.get_const_int(16, 8)});
+        spv.emit_op(cur_body, spv::OpBitwiseOr, {u16, r, lo, hish});
         return r;
       }
     }
@@ -2564,6 +3037,36 @@ struct Compiler {
   }
 
   uint32_t emit_mem_load_ptr(const PtrInfo &base, llvm::Type *ty) {
+    if (base.is_dual()) {
+      if (cur_bb && merges.count(cur_bb) && merges[cur_bb].is_loop) {
+        spv.fail("two-buffer pointer select load inside loop header not supported");
+        return 0;
+      }
+      uint32_t res_ty = spv.map_llvm_type(ty);
+      if (!res_ty) return 0;
+      uint32_t then_lbl = spv.alloc_id();
+      uint32_t else_lbl = spv.alloc_id();
+      uint32_t merge_lbl = spv.alloc_id();
+      spv.emit_op(cur_body, spv::OpSelectionMerge, {merge_lbl, 0u});
+      spv.emit_op(cur_body, spv::OpBranchConditional, {base.sel_cond_id, then_lbl, else_lbl});
+      spv.emit_op(cur_body, spv::OpLabel, {then_lbl});
+      cur_exit_label = then_lbl;
+      uint32_t v_true = emit_mem_load_ptr(base.primary_arm(), ty);
+      if (!v_true) return 0;
+      uint32_t then_exit = cur_exit_label;
+      spv.emit_op(cur_body, spv::OpBranch, {merge_lbl});
+      spv.emit_op(cur_body, spv::OpLabel, {else_lbl});
+      cur_exit_label = else_lbl;
+      uint32_t v_false = emit_mem_load_ptr(base.alt_arm(), ty);
+      if (!v_false) return 0;
+      uint32_t else_exit = cur_exit_label;
+      spv.emit_op(cur_body, spv::OpBranch, {merge_lbl});
+      spv.emit_op(cur_body, spv::OpLabel, {merge_lbl});
+      cur_exit_label = merge_lbl;
+      uint32_t res = spv.alloc_id();
+      spv.emit_op(cur_body, spv::OpPhi, {res_ty, res, v_true, then_exit, v_false, else_exit});
+      return spv.error.empty() ? res : 0u;
+    }
     uint32_t var_id = 0, ptr_elem_ty = 0;
     ElemKind elem = ElemKind::U32;
     bool is_ssbo = false;
@@ -2575,7 +3078,7 @@ struct Compiler {
       return emit_raw_elem_load(base, materialize_elem_idx(base, 2));
     }
     if ((ty->isHalfTy() && elem == ElemKind::F16) ||
-        (ty->isIntegerTy(16) && elem == ElemKind::U16)) {
+        ((ty->isIntegerTy(16) || ty->isBFloatTy()) && elem == ElemKind::U16)) {
       return emit_raw_elem_load(base, materialize_elem_idx(base, 1));
     }
     if (auto *vt = llvm::dyn_cast<llvm::FixedVectorType>(ty)) {
@@ -2586,7 +3089,7 @@ struct Compiler {
       bool match_f32 = ety->isFloatTy() && elem == ElemKind::F32;
       bool match_u32 = ety->isIntegerTy(32) && elem == ElemKind::U32;
       bool match_f16 = ety->isHalfTy() && elem == ElemKind::F16;
-      bool match_u16 = ety->isIntegerTy(16) && elem == ElemKind::U16;
+      bool match_u16 = (ety->isIntegerTy(16) || ety->isBFloatTy()) && elem == ElemKind::U16;
       if (match_f32 || match_u32 || match_f16 || match_u16) {
         uint32_t shift = (match_f32 || match_u32) ? 2u : 1u;
         uint32_t idx0 = materialize_elem_idx(base, shift);
@@ -2610,6 +3113,27 @@ struct Compiler {
   }
 
   bool emit_mem_store_ptr(const PtrInfo &base, llvm::Type *ty, uint32_t val_id) {
+    if (base.is_dual()) {
+      if (cur_bb && merges.count(cur_bb) && merges[cur_bb].is_loop) {
+        return spv.fail("two-buffer pointer select store inside loop header not supported");
+      }
+      uint32_t then_lbl = spv.alloc_id();
+      uint32_t else_lbl = spv.alloc_id();
+      uint32_t merge_lbl = spv.alloc_id();
+      spv.emit_op(cur_body, spv::OpSelectionMerge, {merge_lbl, 0u});
+      spv.emit_op(cur_body, spv::OpBranchConditional, {base.sel_cond_id, then_lbl, else_lbl});
+      spv.emit_op(cur_body, spv::OpLabel, {then_lbl});
+      cur_exit_label = then_lbl;
+      if (!emit_mem_store_ptr(base.primary_arm(), ty, val_id)) return false;
+      spv.emit_op(cur_body, spv::OpBranch, {merge_lbl});
+      spv.emit_op(cur_body, spv::OpLabel, {else_lbl});
+      cur_exit_label = else_lbl;
+      if (!emit_mem_store_ptr(base.alt_arm(), ty, val_id)) return false;
+      spv.emit_op(cur_body, spv::OpBranch, {merge_lbl});
+      spv.emit_op(cur_body, spv::OpLabel, {merge_lbl});
+      cur_exit_label = merge_lbl;
+      return spv.error.empty();
+    }
     uint32_t var_id = 0, ptr_elem_ty = 0;
     ElemKind elem = ElemKind::U32;
     bool is_ssbo = false;
@@ -2620,7 +3144,7 @@ struct Compiler {
       return emit_raw_elem_store(base, materialize_elem_idx(base, 2), val_id);
     }
     if ((ty->isHalfTy() && elem == ElemKind::F16) ||
-        (ty->isIntegerTy(16) && elem == ElemKind::U16)) {
+        ((ty->isIntegerTy(16) || ty->isBFloatTy()) && elem == ElemKind::U16)) {
       return emit_raw_elem_store(base, materialize_elem_idx(base, 1), val_id);
     }
     if (auto *vt = llvm::dyn_cast<llvm::FixedVectorType>(ty)) {
@@ -2630,7 +3154,7 @@ struct Compiler {
       bool match_f32 = ety->isFloatTy() && elem == ElemKind::F32;
       bool match_u32 = ety->isIntegerTy(32) && elem == ElemKind::U32;
       bool match_f16 = ety->isHalfTy() && elem == ElemKind::F16;
-      bool match_u16 = ety->isIntegerTy(16) && elem == ElemKind::U16;
+      bool match_u16 = (ety->isIntegerTy(16) || ety->isBFloatTy()) && elem == ElemKind::U16;
       if (match_f32 || match_u32 || match_f16 || match_u16) {
         uint32_t shift = (match_f32 || match_u32) ? 2u : 1u;
         uint32_t spv_ety = spv.map_llvm_type(ety);
@@ -2771,7 +3295,21 @@ struct Compiler {
         emit_raw_elem_store(base, emit_u32_shr_const(byte_off, 1), bits);
         return true;
       }
-      return spv.fail("half store requires 16-bit storage backing");
+      if (elem == ElemKind::U8) {
+        uint32_t u16 = spv.get_int(16);
+        uint32_t u8 = spv.get_int(8);
+        if (!u16 || !u8) return false;
+        uint32_t bits = spv.alloc_id();
+        spv.emit_op(cur_body, spv::OpBitcast, {u16, bits, val_id});
+        uint32_t b0 = spv.alloc_id(), sh = spv.alloc_id(), b1 = spv.alloc_id();
+        spv.emit_op(cur_body, spv::OpUConvert, {u8, b0, bits});
+        spv.emit_op(cur_body, spv::OpShiftRightLogical, {u16, sh, bits, spv.get_const_int(16, 8)});
+        spv.emit_op(cur_body, spv::OpUConvert, {u8, b1, sh});
+        emit_raw_elem_store(base, byte_off, b0);
+        emit_raw_elem_store(base, emit_u32_add(byte_off, spv.get_const_u32(1)), b1);
+        return true;
+      }
+      return spv.fail("half store requires 16-bit or 8-bit storage backing");
     }
 
     if (ty->isFloatTy() || ty->isIntegerTy(32)) {
@@ -2835,7 +3373,7 @@ struct Compiler {
       }
     }
 
-    if (ty->isIntegerTy(16)) {
+    if (ty->isIntegerTy(16) || ty->isBFloatTy()) {
       if (elem == ElemKind::U16) {
         emit_raw_elem_store(base, emit_u32_shr_const(byte_off, 1), val_id);
         return true;
@@ -2848,7 +3386,19 @@ struct Compiler {
         emit_raw_elem_store(base, emit_u32_shr_const(byte_off, 1), bc);
         return true;
       }
-      return spv.fail("i16 store requires 16-bit storage backing");
+      if (elem == ElemKind::U8) {
+        uint32_t u8 = spv.get_int(8);
+        uint32_t u16 = spv.get_int(16);
+        if (!u8 || !u16) return false;
+        uint32_t lo = spv.alloc_id(), sh = spv.alloc_id(), hi = spv.alloc_id();
+        spv.emit_op(cur_body, spv::OpUConvert, {u8, lo, val_id});
+        spv.emit_op(cur_body, spv::OpShiftRightLogical, {u16, sh, val_id, spv.get_const_int(16, 8)});
+        spv.emit_op(cur_body, spv::OpUConvert, {u8, hi, sh});
+        emit_raw_elem_store(base, byte_off, lo);
+        emit_raw_elem_store(base, emit_u32_add(byte_off, spv.get_const_u32(1)), hi);
+        return true;
+      }
+      return spv.fail("16-bit store requires 16-bit or 8-bit storage backing");
     }
 
     if (ty->isIntegerTy(8) || ty->isIntegerTy(1)) {
@@ -2947,6 +3497,98 @@ struct Compiler {
     return emit_store_scalar_at(base, byte_off, ty, val_id);
   }
 
+  uint32_t splat_const_int(uint32_t bits, uint64_t val, uint32_t lanes) {
+    uint32_t c = spv.get_const_int(bits, val);
+    if (!c || lanes <= 1) return c;
+    uint32_t vty = spv.get_vec(spv.get_int(bits), lanes);
+    if (!vty) return 0;
+    std::vector<uint32_t> elems(lanes, c);
+    auto key = std::make_pair(vty, elems);
+    auto it = spv.const_comp.find(key);
+    if (it != spv.const_comp.end()) return it->second;
+    uint32_t id = spv.alloc_id();
+    std::vector<uint32_t> args = {vty, id};
+    args.insert(args.end(), elems.begin(), elems.end());
+    spv.emit_op_vec(spv.types_consts_vars, spv::OpConstantComposite, args);
+    spv.const_comp[key] = id;
+    return id;
+  }
+
+  uint32_t emit_bf16_to_f32(uint32_t src_id, llvm::Type *bf_ty) {
+    uint32_t lanes = 1u;
+    if (auto *vt = llvm::dyn_cast<llvm::FixedVectorType>(bf_ty)) lanes = vt->getNumElements();
+    uint32_t u32 = spv.get_int(32);
+    uint32_t f32 = spv.get_float(32);
+    uint32_t u32_ty = lanes > 1 ? spv.get_vec(u32, lanes) : u32;
+    uint32_t f32_ty = lanes > 1 ? spv.get_vec(f32, lanes) : f32;
+    uint32_t sh16 = splat_const_int(32, 16u, lanes);
+    uint32_t ext = spv.alloc_id();
+    spv.emit_op(cur_body, spv::OpUConvert, {u32_ty, ext, src_id});
+    uint32_t shifted = spv.alloc_id();
+    spv.emit_op(cur_body, spv::OpShiftLeftLogical, {u32_ty, shifted, ext, sh16});
+    uint32_t res = spv.alloc_id();
+    spv.emit_op(cur_body, spv::OpBitcast, {f32_ty, res, shifted});
+    return spv.error.empty() ? res : 0u;
+  }
+
+  uint32_t emit_f32_to_bf16(uint32_t src_id, llvm::Type *f32_llvm_ty) {
+    uint32_t lanes = 1u;
+    if (auto *vt = llvm::dyn_cast<llvm::FixedVectorType>(f32_llvm_ty)) lanes = vt->getNumElements();
+    uint32_t u16 = spv.get_int(16);
+    uint32_t u32 = spv.get_int(32);
+    uint32_t bty = spv.get_bool();
+    if (!u16 || !u32 || !bty) return 0;
+    uint32_t u16_ty = lanes > 1 ? spv.get_vec(u16, lanes) : u16;
+    uint32_t u32_ty = lanes > 1 ? spv.get_vec(u32, lanes) : u32;
+    uint32_t bool_ty = lanes > 1 ? spv.get_vec(bty, lanes) : bty;
+
+    uint32_t u = spv.alloc_id();
+    spv.emit_op(cur_body, spv::OpBitcast, {u32_ty, u, src_id});
+    uint32_t abs_u = spv.alloc_id();
+    spv.emit_op(cur_body, spv::OpBitwiseAnd, {u32_ty, abs_u, u, splat_const_int(32, 0x7FFFFFFFu, lanes)});
+    uint32_t is_nan = spv.alloc_id();
+    spv.emit_op(cur_body, spv::OpUGreaterThan, {bool_ty, is_nan, abs_u, splat_const_int(32, 0x7F800000u, lanes)});
+    uint32_t hi16 = spv.alloc_id();
+    spv.emit_op(cur_body, spv::OpShiftRightLogical, {u32_ty, hi16, u, splat_const_int(32, 16u, lanes)});
+    uint32_t lsb = spv.alloc_id();
+    spv.emit_op(cur_body, spv::OpBitwiseAnd, {u32_ty, lsb, hi16, splat_const_int(32, 1u, lanes)});
+    uint32_t bias = spv.alloc_id();
+    spv.emit_op(cur_body, spv::OpIAdd, {u32_ty, bias, splat_const_int(32, 0x7FFFu, lanes), lsb});
+    uint32_t sum = spv.alloc_id();
+    spv.emit_op(cur_body, spv::OpIAdd, {u32_ty, sum, u, bias});
+    uint32_t rounded = spv.alloc_id();
+    spv.emit_op(cur_body, spv::OpShiftRightLogical, {u32_ty, rounded, sum, splat_const_int(32, 16u, lanes)});
+    uint32_t nan_bf = spv.alloc_id();
+    spv.emit_op(cur_body, spv::OpBitwiseOr, {u32_ty, nan_bf, hi16, splat_const_int(32, 0x0040u, lanes)});
+    uint32_t sel = spv.alloc_id();
+    spv.emit_op(cur_body, spv::OpSelect, {u32_ty, sel, is_nan, nan_bf, rounded});
+    uint32_t res = spv.alloc_id();
+    spv.emit_op(cur_body, spv::OpUConvert, {u16_ty, res, sel});
+    return spv.error.empty() ? res : 0u;
+  }
+
+  PtrInfo shift_ptr_bytes(const PtrInfo &p, uint32_t delta_bytes) {
+    uint32_t p_off = materialize_byte_off(p.primary_arm());
+    if (delta_bytes != 0) p_off = emit_u32_add(p_off, spv.get_const_u32(delta_bytes));
+    if (!p.is_dual()) {
+      return PtrInfo{p.kind, p.base_id, p_off, 0, 0};
+    }
+    uint32_t a_off = materialize_byte_off(p.alt_arm());
+    if (delta_bytes != 0) a_off = emit_u32_add(a_off, spv.get_const_u32(delta_bytes));
+    return PtrInfo{p.kind, p.base_id, p_off, 0, 0, p.sel_cond_id, p.alt_kind, p.alt_base_id, a_off};
+  }
+
+  bool is_ptr_readonly(const PtrInfo &p) const {
+    if (p.kind == PtrKind::Buffer && (p.base_id >= kMaxBufferSlots || buffers[p.base_id].readonly)) {
+      return true;
+    }
+    if (p.is_dual() && p.alt_kind == PtrKind::Buffer &&
+        (p.alt_base_id >= kMaxBufferSlots || buffers[p.alt_base_id].readonly)) {
+      return true;
+    }
+    return false;
+  }
+
   uint32_t get_val(llvm::Value *v) {
     if (auto it = val_map.find(v); it != val_map.end()) return it->second;
     if (auto *c = llvm::dyn_cast<llvm::Constant>(v)) return spv.emit_constant(c);
@@ -2996,13 +3638,14 @@ struct Compiler {
       if ((spv.hw_caps.subgroup_ops & AIR2SPV_SUBGROUP_BASIC) == 0) {
         return spv.fail("simdgroup barrier requires subgroup basic capability unsupported by GPU");
       }
+      uint32_t scope = (spv.hw_caps.subgroup_size == 16u)
+                           ? static_cast<uint32_t>(spv::ScopeWorkgroup)
+                           : static_cast<uint32_t>(spv::ScopeSubgroup);
       uint32_t sem = static_cast<uint32_t>(spv::MemorySemanticsAcquireReleaseMask) |
                      static_cast<uint32_t>(spv::MemorySemanticsWorkgroupMemoryMask) |
                      static_cast<uint32_t>(spv::MemorySemanticsUniformMemoryMask);
       spv.emit_op(cur_body, spv::OpControlBarrier,
-                  {spv.get_const_u32(static_cast<uint32_t>(spv::ScopeSubgroup)),
-                   spv.get_const_u32(static_cast<uint32_t>(spv::ScopeSubgroup)),
-                   spv.get_const_u32(sem)});
+                  {spv.get_const_u32(scope), spv.get_const_u32(scope), spv.get_const_u32(sem)});
       return spv.error.empty();
     }
 
@@ -3012,8 +3655,7 @@ struct Compiler {
       if (dst.kind == PtrKind::Invalid || dst.kind == PtrKind::FuncConst) {
         return spv.fail("invalid llvm.memset destination");
       }
-      if (dst.kind == PtrKind::Buffer &&
-          (dst.base_id >= kMaxBufferSlots || buffers[dst.base_id].readonly)) {
+      if (is_ptr_readonly(dst)) {
         return spv.fail("llvm.memset to readonly buffer");
       }
       auto *len_c = llvm::dyn_cast<llvm::ConstantInt>(ci->getArgOperand(2));
@@ -3021,7 +3663,6 @@ struct Compiler {
       if (!len_c || !try_get_u64(len_c, nbytes) || nbytes > 1024u) {
         return spv.fail("llvm.memset requires constant size <= 1024");
       }
-      uint32_t base_off = materialize_byte_off(dst);
       llvm::Type *i32_ty = llvm::Type::getInt32Ty(mod.getContext());
       llvm::Type *i8_ty = llvm::Type::getInt8Ty(mod.getContext());
       uint64_t off = 0;
@@ -3030,10 +3671,9 @@ struct Compiler {
         uint32_t w32 = b * 0x01010101u;
         uint32_t c32 = spv.get_const_u32(w32);
         while (off + 4u <= nbytes) {
-          PtrInfo p{dst.kind, dst.base_id,
-                    off == 0 ? base_off : emit_u32_add(base_off, spv.get_const_u32(static_cast<uint32_t>(off))),
-                    0, 0};
-          if (!emit_mem_store_ptr(p, i32_ty, c32)) return false;
+          if (!emit_mem_store_ptr(shift_ptr_bytes(dst, static_cast<uint32_t>(off)), i32_ty, c32)) {
+            return false;
+          }
           off += 4u;
         }
       }
@@ -3041,10 +3681,9 @@ struct Compiler {
         uint32_t vb = get_val(ci->getArgOperand(1));
         if (!vb) return false;
         while (off < nbytes) {
-          PtrInfo p{dst.kind, dst.base_id,
-                    off == 0 ? base_off : emit_u32_add(base_off, spv.get_const_u32(static_cast<uint32_t>(off))),
-                    0, 0};
-          if (!emit_mem_store_ptr(p, i8_ty, vb)) return false;
+          if (!emit_mem_store_ptr(shift_ptr_bytes(dst, static_cast<uint32_t>(off)), i8_ty, vb)) {
+            return false;
+          }
           off += 1u;
         }
       }
@@ -3058,8 +3697,7 @@ struct Compiler {
           src.kind == PtrKind::Invalid || src.kind == PtrKind::FuncConst) {
         return spv.fail("invalid llvm.memcpy pointer");
       }
-      if (dst.kind == PtrKind::Buffer &&
-          (dst.base_id >= kMaxBufferSlots || buffers[dst.base_id].readonly)) {
+      if (is_ptr_readonly(dst)) {
         return spv.fail("llvm.memcpy to readonly buffer");
       }
       auto *len_c = llvm::dyn_cast<llvm::ConstantInt>(ci->getArgOperand(2));
@@ -3067,25 +3705,23 @@ struct Compiler {
       if (!len_c || !try_get_u64(len_c, nbytes) || nbytes > 1024u) {
         return spv.fail("llvm.memcpy requires constant size <= 1024");
       }
-      uint32_t dst_off = materialize_byte_off(dst);
-      uint32_t src_off = materialize_byte_off(src);
       llvm::Type *i32_ty = llvm::Type::getInt32Ty(mod.getContext());
       llvm::Type *i8_ty = llvm::Type::getInt8Ty(mod.getContext());
       uint64_t off = 0;
       while (off + 4u <= nbytes) {
-        uint32_t so = off == 0 ? src_off : emit_u32_add(src_off, spv.get_const_u32(static_cast<uint32_t>(off)));
-        uint32_t doff = off == 0 ? dst_off : emit_u32_add(dst_off, spv.get_const_u32(static_cast<uint32_t>(off)));
-        uint32_t v = emit_mem_load_ptr(PtrInfo{src.kind, src.base_id, so, 0, 0}, i32_ty);
+        uint32_t v = emit_mem_load_ptr(shift_ptr_bytes(src, static_cast<uint32_t>(off)), i32_ty);
         if (!v) return false;
-        if (!emit_mem_store_ptr(PtrInfo{dst.kind, dst.base_id, doff, 0, 0}, i32_ty, v)) return false;
+        if (!emit_mem_store_ptr(shift_ptr_bytes(dst, static_cast<uint32_t>(off)), i32_ty, v)) {
+          return false;
+        }
         off += 4u;
       }
       while (off < nbytes) {
-        uint32_t so = off == 0 ? src_off : emit_u32_add(src_off, spv.get_const_u32(static_cast<uint32_t>(off)));
-        uint32_t doff = off == 0 ? dst_off : emit_u32_add(dst_off, spv.get_const_u32(static_cast<uint32_t>(off)));
-        uint32_t v = emit_mem_load_ptr(PtrInfo{src.kind, src.base_id, so, 0, 0}, i8_ty);
+        uint32_t v = emit_mem_load_ptr(shift_ptr_bytes(src, static_cast<uint32_t>(off)), i8_ty);
         if (!v) return false;
-        if (!emit_mem_store_ptr(PtrInfo{dst.kind, dst.base_id, doff, 0, 0}, i8_ty, v)) return false;
+        if (!emit_mem_store_ptr(shift_ptr_bytes(dst, static_cast<uint32_t>(off)), i8_ty, v)) {
+          return false;
+        }
         off += 1u;
       }
       return spv.error.empty();
@@ -3115,7 +3751,13 @@ struct Compiler {
     else if (stem.starts_with("air.")) stem = stem.drop_front(4);
     else if (stem.starts_with("llvm.")) stem = stem.drop_front(5);
 
-    /* GLSL.std.450 math ops with strict operand/result type checking. */
+    auto make_f32_llvm_ty = [&](llvm::Type *t) -> llvm::Type * {
+      uint32_t lanes = vec_lanes(t);
+      llvm::Type *f32_t = llvm::Type::getFloatTy(mod.getContext());
+      return lanes > 1 ? static_cast<llvm::Type *>(llvm::FixedVectorType::get(f32_t, lanes)) : f32_t;
+    };
+
+    /* GLSL.std.450 math ops with strict operand/result type checking (software BF16 via f32). */
     auto unary_glsl = [&](uint32_t glsl_op, bool expect_fp) -> bool {
       if (ci->arg_size() < 1) return spv.fail("missing math arg");
       if (expect_fp ? !rty->isFPOrFPVectorTy() : !is_nonbool_int(rty)) {
@@ -3126,6 +3768,17 @@ struct Compiler {
       }
       uint32_t a = get_val(ci->getArgOperand(0));
       if (!a) return false;
+      if (expect_fp && rty->getScalarType()->isBFloatTy()) {
+        llvm::Type *f32_llvm = make_f32_llvm_ty(rty);
+        uint32_t f32_spv = spv.map_llvm_type(f32_llvm);
+        uint32_t af = emit_bf16_to_f32(a, rty);
+        if (!f32_spv || !af) return false;
+        uint32_t rf = emit_glsl_ext(f32_spv, glsl_op, {af});
+        uint32_t rb = emit_f32_to_bf16(rf, f32_llvm);
+        if (!rb) return false;
+        val_map[ci] = rb;
+        return spv.error.empty();
+      }
       val_map[ci] = emit_glsl_ext(spv_rty, glsl_op, {a});
       return spv.error.empty();
     };
@@ -3140,6 +3793,18 @@ struct Compiler {
       uint32_t a = get_val(ci->getArgOperand(0));
       uint32_t b = get_val(ci->getArgOperand(1));
       if (!a || !b) return false;
+      if (expect_fp && rty->getScalarType()->isBFloatTy()) {
+        llvm::Type *f32_llvm = make_f32_llvm_ty(rty);
+        uint32_t f32_spv = spv.map_llvm_type(f32_llvm);
+        uint32_t af = emit_bf16_to_f32(a, rty);
+        uint32_t bf = emit_bf16_to_f32(b, rty);
+        if (!f32_spv || !af || !bf) return false;
+        uint32_t rf = emit_glsl_ext(f32_spv, glsl_op, {af, bf});
+        uint32_t rb = emit_f32_to_bf16(rf, f32_llvm);
+        if (!rb) return false;
+        val_map[ci] = rb;
+        return spv.error.empty();
+      }
       val_map[ci] = emit_glsl_ext(spv_rty, glsl_op, {a, b});
       return spv.error.empty();
     };
@@ -3156,6 +3821,19 @@ struct Compiler {
       uint32_t b = get_val(ci->getArgOperand(1));
       uint32_t c = get_val(ci->getArgOperand(2));
       if (!a || !b || !c) return false;
+      if (expect_fp && rty->getScalarType()->isBFloatTy()) {
+        llvm::Type *f32_llvm = make_f32_llvm_ty(rty);
+        uint32_t f32_spv = spv.map_llvm_type(f32_llvm);
+        uint32_t af = emit_bf16_to_f32(a, rty);
+        uint32_t bf = emit_bf16_to_f32(b, rty);
+        uint32_t cf = emit_bf16_to_f32(c, rty);
+        if (!f32_spv || !af || !bf || !cf) return false;
+        uint32_t rf = emit_glsl_ext(f32_spv, glsl_op, {af, bf, cf});
+        uint32_t rb = emit_f32_to_bf16(rf, f32_llvm);
+        if (!rb) return false;
+        val_map[ci] = rb;
+        return spv.error.empty();
+      }
       val_map[ci] = emit_glsl_ext(spv_rty, glsl_op, {a, b, c});
       return spv.error.empty();
     };
@@ -3229,6 +3907,18 @@ struct Compiler {
       uint32_t a = get_val(ci->getArgOperand(0));
       uint32_t b = get_val(ci->getArgOperand(1));
       if (!a || !b) return false;
+      if (rty->isBFloatTy()) {
+        uint32_t af = emit_bf16_to_f32(a, vt);
+        uint32_t bf = emit_bf16_to_f32(b, vt);
+        if (!af || !bf) return false;
+        uint32_t f32 = spv.get_float(32);
+        uint32_t df = spv.alloc_id();
+        spv.emit_op(cur_body, spv::OpDot, {f32, df, af, bf});
+        uint32_t db = emit_f32_to_bf16(df, llvm::Type::getFloatTy(mod.getContext()));
+        if (!db) return false;
+        val_map[ci] = db;
+        return spv.error.empty();
+      }
       uint32_t id = spv.alloc_id();
       spv.emit_op(cur_body, spv::OpDot, {spv_rty, id, a, b});
       val_map[ci] = id;
@@ -3261,6 +3951,17 @@ struct Compiler {
     }
 
     /* Subgroup (SIMD-group) intrinsics gated against hardware supportedOperations. */
+    uint32_t max_wg_budget = spv.hw_caps.max_workgroup_memory
+                                 ? std::min(spv.hw_caps.max_workgroup_memory, kMaxWorkgroupBytes)
+                                 : kMaxWorkgroupBytes;
+    auto emit_wg_total_threads = [&]() -> uint32_t {
+      uint32_t u32 = spv.get_int(32);
+      uint32_t xy = spv.alloc_id();
+      spv.emit_op(cur_body, spv::OpIMul, {u32, xy, spv.spec_lx, spv.spec_ly});
+      uint32_t tot = spv.alloc_id();
+      spv.emit_op(cur_body, spv::OpIMul, {u32, tot, xy, spv.spec_lz});
+      return tot;
+    };
     auto emit_subgroup_arith = [&](spv::Op fp_op, spv::Op int_op, spv::GroupOperation gop) -> bool {
       if (ci->arg_size() < 1) return spv.fail("missing subgroup arith arg");
       uint32_t req_ops = AIR2SPV_SUBGROUP_BASIC | AIR2SPV_SUBGROUP_ARITHMETIC;
@@ -3275,76 +3976,160 @@ struct Compiler {
       spv.caps.insert(spv::CapabilityGroupNonUniformArithmetic);
       uint32_t a = get_val(ci->getArgOperand(0));
       if (!a) return false;
+
+      bool is_bf16 = rty->getScalarType()->isBFloatTy();
+      bool is_half_emul = (spv.hw_caps.subgroup_size == 16u && rty->isHalfTy());
+      if (spv.hw_caps.subgroup_size == 16u &&
+          !(rty->isFloatTy() || rty->isIntegerTy(32) || rty->isHalfTy() || rty->isBFloatTy())) {
+        return spv.fail("unsupported type for 32-lane simdgroup arithmetic emulation on 16-lane GPU");
+      }
+
+      uint32_t work_a = a;
+      uint32_t work_spv_ty = spv_rty;
+      bool work_is_fp = rty->isFPOrFPVectorTy();
+      if (is_bf16) {
+        llvm::Type *f32_llvm = make_f32_llvm_ty(rty);
+        work_spv_ty = spv.map_llvm_type(f32_llvm);
+        work_a = emit_bf16_to_f32(a, rty);
+        if (!work_spv_ty || !work_a) return false;
+      } else if (is_half_emul) {
+        work_spv_ty = spv.get_float(32);
+        uint32_t af = spv.alloc_id();
+        spv.emit_op(cur_body, spv::OpFConvert, {work_spv_ty, af, a});
+        work_a = af;
+      }
+
       uint32_t id = spv.alloc_id();
-      spv.emit_op(cur_body, rty->isFPOrFPVectorTy() ? fp_op : int_op,
-                  {spv_rty, id, spv.get_const_u32(static_cast<uint32_t>(spv::ScopeSubgroup)),
-                   static_cast<uint32_t>(gop), a});
-      if (spv.hw_caps.subgroup_size == 16u && gop == spv::GroupOperationReduce &&
-          (rty->isFloatTy() || rty->isIntegerTy(32))) {
-        /* Pair adjacent 16-lane hardware subgroups via 256B workgroup scratch to form 32-lane reductions. */
-        bool is_fp = rty->isFloatTy();
+      spv.emit_op(cur_body, work_is_fp ? fp_op : int_op,
+                  {work_spv_ty, id, spv.get_const_u32(static_cast<uint32_t>(spv::ScopeSubgroup)),
+                   static_cast<uint32_t>(gop), work_a});
+
+      if (spv.hw_caps.subgroup_size == 16u) {
+        /* Pair adjacent 16-lane halves via 256B workgroup u32 scratch (atomic store avoids races). */
         uint32_t u32 = spv.get_int(32);
         uint32_t bty = spv.get_bool();
-        uint32_t sg_var = get_or_create_builtin_var(BuiltinKind::SubgroupId);
-        uint32_t nsg_var = get_or_create_builtin_var(BuiltinKind::NumSubgroups);
-        if (!sg_var || !nsg_var) return false;
+        uint32_t lvar = get_or_create_builtin_var(BuiltinKind::LocalInvocationIndex);
+        if (!lvar) return false;
+        uint32_t raw_lid = spv.alloc_id();
+        spv.emit_op(cur_body, spv::OpLoad, {u32, raw_lid, lvar});
         uint32_t hw_sg = spv.alloc_id();
-        spv.emit_op(cur_body, spv::OpLoad, {u32, hw_sg, sg_var});
-        uint32_t hw_nsg = spv.alloc_id();
-        spv.emit_op(cur_body, spv::OpLoad, {u32, hw_nsg, nsg_var});
+        spv.emit_op(cur_body, spv::OpShiftRightLogical, {u32, hw_sg, raw_lid, spv.get_const_u32(4u)});
         uint32_t sg_idx = spv.alloc_id();
         spv.emit_op(cur_body, spv::OpBitwiseAnd, {u32, sg_idx, hw_sg, spv.get_const_u32(63u)});
-        uint32_t partner = spv.alloc_id();
-        spv.emit_op(cur_body, spv::OpBitwiseXor, {u32, partner, hw_sg, spv.get_const_u32(1u)});
-        uint32_t has_partner = spv.alloc_id();
-        spv.emit_op(cur_body, spv::OpULessThan, {bty, has_partner, partner, hw_nsg});
-        uint32_t partner_idx = spv.alloc_id();
-        spv.emit_op(cur_body, spv::OpBitwiseAnd, {u32, partner_idx, partner, spv.get_const_u32(63u)});
-        uint32_t safe_partner = spv.alloc_id();
-        spv.emit_op(cur_body, spv::OpSelect, {u32, safe_partner, has_partner, partner_idx, sg_idx});
+
+        uint32_t wg_tot = emit_wg_total_threads();
+        uint32_t plus15 = spv.alloc_id();
+        spv.emit_op(cur_body, spv::OpIAdd, {u32, plus15, wg_tot, spv.get_const_u32(15u)});
+        uint32_t hw_nsg = spv.alloc_id();
+        spv.emit_op(cur_body, spv::OpShiftRightLogical, {u32, hw_nsg, plus15, spv.get_const_u32(4u)});
 
         uint32_t ptr_ty = 0;
-        uint32_t scratch_var = spv.get_sg32_scratch(is_fp, &ptr_ty);
+        uint32_t scratch_var = spv.get_sg32_scratch_u32(wg_bytes_used, max_wg_budget, &ptr_ty);
+        if (!scratch_var) return false;
+
+        uint32_t pub_val = id;
+        if (gop != spv::GroupOperationReduce) {
+          pub_val = spv.alloc_id();
+          spv.emit_op(cur_body, work_is_fp ? fp_op : int_op,
+                      {work_spv_ty, pub_val,
+                       spv.get_const_u32(static_cast<uint32_t>(spv::ScopeSubgroup)),
+                       static_cast<uint32_t>(spv::GroupOperationReduce), work_a});
+        }
+        uint32_t pub_u32 = pub_val;
+        if (work_is_fp) {
+          pub_u32 = spv.alloc_id();
+          spv.emit_op(cur_body, spv::OpBitcast, {u32, pub_u32, pub_val});
+        }
         uint32_t st_ptr = spv.alloc_id();
         spv.emit_op(cur_body, spv::OpAccessChain, {ptr_ty, st_ptr, scratch_var, sg_idx});
-        spv.emit_op(cur_body, spv::OpStore, {st_ptr, id});
+        spv.emit_op(cur_body, spv::OpAtomicStore,
+                    {st_ptr, spv.get_const_u32(static_cast<uint32_t>(spv::ScopeWorkgroup)),
+                     spv.get_const_u32(0u), pub_u32});
         uint32_t sem = static_cast<uint32_t>(spv::MemorySemanticsAcquireReleaseMask) |
                        static_cast<uint32_t>(spv::MemorySemanticsWorkgroupMemoryMask);
         spv.emit_op(cur_body, spv::OpControlBarrier,
                     {spv.get_const_u32(static_cast<uint32_t>(spv::ScopeWorkgroup)),
                      spv.get_const_u32(static_cast<uint32_t>(spv::ScopeWorkgroup)),
                      spv.get_const_u32(sem)});
-        uint32_t ld_ptr = spv.alloc_id();
-        spv.emit_op(cur_body, spv::OpAccessChain, {ptr_ty, ld_ptr, scratch_var, safe_partner});
-        uint32_t pval = spv.alloc_id();
-        spv.emit_op(cur_body, spv::OpLoad, {spv_rty, pval, ld_ptr});
-        uint32_t comb = 0;
-        if (is_fp) {
-          if (fp_op == spv::OpGroupNonUniformFAdd) {
-            comb = spv.alloc_id();
-            spv.emit_op(cur_body, spv::OpFAdd, {spv_rty, comb, id, pval});
-          } else if (fp_op == spv::OpGroupNonUniformFMax) {
-            comb = emit_glsl_ext(spv_rty, GLSLstd450FMax, {id, pval});
-          } else {
-            comb = emit_glsl_ext(spv_rty, GLSLstd450FMin, {id, pval});
+
+        if (gop == spv::GroupOperationReduce) {
+          uint32_t partner = spv.alloc_id();
+          spv.emit_op(cur_body, spv::OpBitwiseXor, {u32, partner, hw_sg, spv.get_const_u32(1u)});
+          uint32_t has_partner = spv.alloc_id();
+          spv.emit_op(cur_body, spv::OpULessThan, {bty, has_partner, partner, hw_nsg});
+          uint32_t partner_idx = spv.alloc_id();
+          spv.emit_op(cur_body, spv::OpBitwiseAnd, {u32, partner_idx, partner, spv.get_const_u32(63u)});
+          uint32_t safe_partner = spv.alloc_id();
+          spv.emit_op(cur_body, spv::OpSelect, {u32, safe_partner, has_partner, partner_idx, sg_idx});
+          uint32_t ld_ptr = spv.alloc_id();
+          spv.emit_op(cur_body, spv::OpAccessChain, {ptr_ty, ld_ptr, scratch_var, safe_partner});
+          uint32_t pval_u32 = spv.alloc_id();
+          spv.emit_op(cur_body, spv::OpLoad, {u32, pval_u32, ld_ptr});
+          uint32_t pval = pval_u32;
+          if (work_is_fp) {
+            pval = spv.alloc_id();
+            spv.emit_op(cur_body, spv::OpBitcast, {work_spv_ty, pval, pval_u32});
           }
+          uint32_t comb = 0;
+          if (work_is_fp) {
+            if (fp_op == spv::OpGroupNonUniformFAdd) {
+              comb = spv.alloc_id();
+              spv.emit_op(cur_body, spv::OpFAdd, {work_spv_ty, comb, id, pval});
+            } else if (fp_op == spv::OpGroupNonUniformFMax) {
+              comb = emit_glsl_ext(work_spv_ty, GLSLstd450FMax, {id, pval});
+            } else {
+              comb = emit_glsl_ext(work_spv_ty, GLSLstd450FMin, {id, pval});
+            }
+          } else {
+            if (int_op == spv::OpGroupNonUniformIAdd) {
+              comb = spv.alloc_id();
+              spv.emit_op(cur_body, spv::OpIAdd, {work_spv_ty, comb, id, pval});
+            } else if (int_op == spv::OpGroupNonUniformSMax) {
+              comb = emit_glsl_ext(work_spv_ty, GLSLstd450SMax, {id, pval});
+            } else {
+              comb = emit_glsl_ext(work_spv_ty, GLSLstd450SMin, {id, pval});
+            }
+          }
+          uint32_t res = spv.alloc_id();
+          spv.emit_op(cur_body, spv::OpSelect, {work_spv_ty, res, has_partner, comb, id});
+          id = res;
         } else {
-          if (int_op == spv::OpGroupNonUniformIAdd) {
-            comb = spv.alloc_id();
-            spv.emit_op(cur_body, spv::OpIAdd, {spv_rty, comb, id, pval});
-          } else if (int_op == spv::OpGroupNonUniformSMax) {
-            comb = emit_glsl_ext(spv_rty, GLSLstd450SMax, {id, pval});
-          } else {
-            comb = emit_glsl_ext(spv_rty, GLSLstd450SMin, {id, pval});
+          /* 32-lane ExclusiveScan / InclusiveScan: odd half adds even half's 16-lane total. */
+          uint32_t even_idx = spv.alloc_id();
+          spv.emit_op(cur_body, spv::OpBitwiseAnd, {u32, even_idx, sg_idx, spv.get_const_u32(~1u & 63u)});
+          uint32_t odd_bit = spv.alloc_id();
+          spv.emit_op(cur_body, spv::OpBitwiseAnd, {u32, odd_bit, sg_idx, spv.get_const_u32(1u)});
+          uint32_t is_odd = spv.alloc_id();
+          spv.emit_op(cur_body, spv::OpINotEqual, {bty, is_odd, odd_bit, spv.get_const_u32(0u)});
+          uint32_t ld_ptr = spv.alloc_id();
+          spv.emit_op(cur_body, spv::OpAccessChain, {ptr_ty, ld_ptr, scratch_var, even_idx});
+          uint32_t eval_u32 = spv.alloc_id();
+          spv.emit_op(cur_body, spv::OpLoad, {u32, eval_u32, ld_ptr});
+          uint32_t eval = eval_u32;
+          if (work_is_fp) {
+            eval = spv.alloc_id();
+            spv.emit_op(cur_body, spv::OpBitcast, {work_spv_ty, eval, eval_u32});
           }
+          uint32_t shifted = spv.alloc_id();
+          spv.emit_op(cur_body, work_is_fp ? spv::OpFAdd : spv::OpIAdd,
+                      {work_spv_ty, shifted, id, eval});
+          uint32_t res = spv.alloc_id();
+          spv.emit_op(cur_body, spv::OpSelect, {work_spv_ty, res, is_odd, shifted, id});
+          id = res;
         }
-        uint32_t res = spv.alloc_id();
-        spv.emit_op(cur_body, spv::OpSelect, {spv_rty, res, has_partner, comb, id});
         spv.emit_op(cur_body, spv::OpControlBarrier,
                     {spv.get_const_u32(static_cast<uint32_t>(spv::ScopeWorkgroup)),
                      spv.get_const_u32(static_cast<uint32_t>(spv::ScopeWorkgroup)),
                      spv.get_const_u32(sem)});
-        id = res;
+      }
+
+      if (is_bf16) {
+        id = emit_f32_to_bf16(id, make_f32_llvm_ty(rty));
+        if (!id) return false;
+      } else if (is_half_emul) {
+        uint32_t h = spv.alloc_id();
+        spv.emit_op(cur_body, spv::OpFConvert, {spv_rty, h, id});
+        id = h;
       }
       val_map[ci] = id;
       return spv.error.empty();
@@ -3366,9 +4151,24 @@ struct Compiler {
                                  spv::GroupOperationReduce);
     auto emit_sg32_shuffle_emu = [&](uint32_t val, uint32_t arg, int mode) -> bool {
       /* mode: 0=down, 1=up, 2=xor, 3=index/broadcast */
-      bool is_fp = rty->isFloatTy();
+      if (!(rty->isFloatTy() || rty->isIntegerTy(32) || rty->isHalfTy() || rty->isBFloatTy() ||
+            rty->isIntegerTy(16))) {
+        return spv.fail("unsupported type for 32-lane simdgroup shuffle emulation on 16-lane GPU");
+      }
+      bool is_fp = rty->isFloatTy() || rty->isHalfTy();
       uint32_t u32 = spv.get_int(32);
+      uint32_t f32 = spv.get_float(32);
       uint32_t bty = spv.get_bool();
+      uint32_t work_ty = is_fp ? f32 : u32;
+      uint32_t work_val = val;
+      if (rty->isHalfTy()) {
+        work_val = spv.alloc_id();
+        spv.emit_op(cur_body, spv::OpFConvert, {f32, work_val, val});
+      } else if (rty->isBFloatTy() || rty->isIntegerTy(16)) {
+        work_val = spv.alloc_id();
+        spv.emit_op(cur_body, spv::OpUConvert, {u32, work_val, val});
+      }
+
       uint32_t lvar = get_or_create_builtin_var(BuiltinKind::LocalInvocationIndex);
       if (!lvar) return false;
       uint32_t raw_lid = spv.alloc_id();
@@ -3381,10 +4181,11 @@ struct Compiler {
       spv.emit_op(cur_body, spv::OpBitwiseAnd, {u32, base, lid, spv.get_const_u32(~31u & 1023u)});
 
       uint32_t ptr_ty = 0;
-      uint32_t scratch = spv.get_sg32_shuf_scratch(is_fp, &ptr_ty);
+      uint32_t scratch = spv.get_sg32_shuf_scratch(is_fp, wg_bytes_used, max_wg_budget, &ptr_ty);
+      if (!scratch) return false;
       uint32_t st_ptr = spv.alloc_id();
       spv.emit_op(cur_body, spv::OpAccessChain, {ptr_ty, st_ptr, scratch, lid});
-      spv.emit_op(cur_body, spv::OpStore, {st_ptr, val});
+      spv.emit_op(cur_body, spv::OpStore, {st_ptr, work_val});
       uint32_t sem = static_cast<uint32_t>(spv::MemorySemanticsAcquireReleaseMask) |
                      static_cast<uint32_t>(spv::MemorySemanticsWorkgroupMemoryMask);
       spv.emit_op(cur_body, spv::OpControlBarrier,
@@ -3394,10 +4195,14 @@ struct Compiler {
 
       uint32_t target_idx = lid;
       if (mode == 0) {
+        uint32_t arg_ok = spv.alloc_id();
+        spv.emit_op(cur_body, spv::OpULessThan, {bty, arg_ok, arg, spv.get_const_u32(32u)});
         uint32_t tlane = spv.alloc_id();
         spv.emit_op(cur_body, spv::OpIAdd, {u32, tlane, lane, arg});
+        uint32_t tlane_ok = spv.alloc_id();
+        spv.emit_op(cur_body, spv::OpULessThan, {bty, tlane_ok, tlane, spv.get_const_u32(32u)});
         uint32_t ok = spv.alloc_id();
-        spv.emit_op(cur_body, spv::OpULessThan, {bty, ok, tlane, spv.get_const_u32(32u)});
+        spv.emit_op(cur_body, spv::OpLogicalAnd, {bty, ok, arg_ok, tlane_ok});
         uint32_t cand = spv.alloc_id();
         spv.emit_op(cur_body, spv::OpIAdd, {u32, cand, base, tlane});
         target_idx = spv.alloc_id();
@@ -3424,14 +4229,30 @@ struct Compiler {
         target_idx = spv.alloc_id();
         spv.emit_op(cur_body, spv::OpIAdd, {u32, target_idx, base, tlane});
       }
+      /* Clamp against actual workgroup size so non-multiple-of-32 groups never read uninitialized slots. */
+      uint32_t wg_tot = emit_wg_total_threads();
+      uint32_t in_wg = spv.alloc_id();
+      spv.emit_op(cur_body, spv::OpULessThan, {bty, in_wg, target_idx, wg_tot});
+      uint32_t safe_idx = spv.alloc_id();
+      spv.emit_op(cur_body, spv::OpSelect, {u32, safe_idx, in_wg, target_idx, lid});
+
       uint32_t ld_ptr = spv.alloc_id();
-      spv.emit_op(cur_body, spv::OpAccessChain, {ptr_ty, ld_ptr, scratch, target_idx});
+      spv.emit_op(cur_body, spv::OpAccessChain, {ptr_ty, ld_ptr, scratch, safe_idx});
       uint32_t res = spv.alloc_id();
-      spv.emit_op(cur_body, spv::OpLoad, {spv_rty, res, ld_ptr});
+      spv.emit_op(cur_body, spv::OpLoad, {work_ty, res, ld_ptr});
       spv.emit_op(cur_body, spv::OpControlBarrier,
                   {spv.get_const_u32(static_cast<uint32_t>(spv::ScopeWorkgroup)),
                    spv.get_const_u32(static_cast<uint32_t>(spv::ScopeWorkgroup)),
                    spv.get_const_u32(sem)});
+      if (rty->isHalfTy()) {
+        uint32_t h = spv.alloc_id();
+        spv.emit_op(cur_body, spv::OpFConvert, {spv_rty, h, res});
+        res = h;
+      } else if (rty->isBFloatTy() || rty->isIntegerTy(16)) {
+        uint32_t u16v = spv.alloc_id();
+        spv.emit_op(cur_body, spv::OpUConvert, {spv_rty, u16v, res});
+        res = u16v;
+      }
       val_map[ci] = res;
       return spv.error.empty();
     };
@@ -3445,7 +4266,7 @@ struct Compiler {
       uint32_t val = get_val(ci->getArgOperand(0));
       uint32_t delta = get_index_u32(ci->getArgOperand(1));
       if (!val || !delta) return false;
-      if (spv.hw_caps.subgroup_size == 16u && (rty->isFloatTy() || rty->isIntegerTy(32))) {
+      if (spv.hw_caps.subgroup_size == 16u) {
         int mode = 3;
         if (match_math("air.simd_shuffle_down")) mode = 0;
         else if (match_math("air.simd_shuffle_up")) mode = 1;
@@ -3481,7 +4302,7 @@ struct Compiler {
       uint32_t val = get_val(ci->getArgOperand(0));
       uint32_t lane = get_index_u32(ci->getArgOperand(1));
       if (!val || !lane) return false;
-      if (spv.hw_caps.subgroup_size == 16u && (rty->isFloatTy() || rty->isIntegerTy(32))) {
+      if (spv.hw_caps.subgroup_size == 16u) {
         return emit_sg32_shuffle_emu(val, lane, 3);
       }
       uint32_t req_ops = AIR2SPV_SUBGROUP_BASIC | AIR2SPV_SUBGROUP_BALLOT;
@@ -3525,6 +4346,9 @@ struct Compiler {
         } else if (r_scalar->isHalfTy()) {
           c_zero = spv.get_const_fp_bits(16, 0x0000u);
           c_one = spv.get_const_fp_bits(16, is_signed ? 0xBC00u : 0x3C00u);
+        } else if (r_scalar->isBFloatTy()) {
+          c_zero = spv.get_const_int(16, 0x0000u);
+          c_one = spv.get_const_int(16, is_signed ? 0xBF80u : 0x3F80u);
         } else if (auto *it = llvm::dyn_cast<llvm::IntegerType>(r_scalar)) {
           uint32_t bw = it->getBitWidth();
           c_zero = spv.get_const_int(bw, 0);
@@ -3553,6 +4377,42 @@ struct Compiler {
         uint32_t id = spv.alloc_id();
         spv.emit_op(cur_body, spv::OpSelect, {spv_rty, id, src_id, c_one, c_zero});
         val_map[ci] = id;
+        return spv.error.empty();
+      }
+      bool src_is_bf16 = sty->getScalarType()->isBFloatTy();
+      bool dst_is_bf16 = rty->getScalarType()->isBFloatTy();
+      if (src_is_bf16 || dst_is_bf16) {
+        uint32_t lanes = vec_lanes(rty);
+        llvm::Type *f32_llvm = lanes > 1 ? static_cast<llvm::Type *>(
+                                               llvm::FixedVectorType::get(llvm::Type::getFloatTy(mod.getContext()), lanes))
+                                         : static_cast<llvm::Type *>(llvm::Type::getFloatTy(mod.getContext()));
+        uint32_t f32_spv = spv.map_llvm_type(f32_llvm);
+        if (!f32_spv) return false;
+        uint32_t cur = src_id;
+        if (src_is_bf16) {
+          cur = emit_bf16_to_f32(cur, sty);
+          if (!cur) return false;
+          if (rty->getScalarType()->isFloatTy()) {
+            val_map[ci] = cur;
+            return spv.error.empty();
+          }
+          uint32_t id = spv.alloc_id();
+          spv::Op op = rty->isFPOrFPVectorTy() ? spv::OpFConvert
+                                               : (name.contains(".s.") ? spv::OpConvertFToS : spv::OpConvertFToU);
+          spv.emit_op(cur_body, op, {spv_rty, id, cur});
+          val_map[ci] = id;
+          return spv.error.empty();
+        }
+        if (!sty->getScalarType()->isFloatTy()) {
+          uint32_t tmp = spv.alloc_id();
+          spv::Op op = sty->isFPOrFPVectorTy() ? spv::OpFConvert
+                                               : (name.contains(".s.") ? spv::OpConvertSToF : spv::OpConvertUToF);
+          spv.emit_op(cur_body, op, {f32_spv, tmp, cur});
+          cur = tmp;
+        }
+        uint32_t bf = emit_f32_to_bf16(cur, f32_llvm);
+        if (!bf) return false;
+        val_map[ci] = bf;
         return spv.error.empty();
       }
       uint32_t id = spv.alloc_id();
@@ -3597,18 +4457,28 @@ struct Compiler {
       PtrInfo ptr = resolve_ptr(li->getPointerOperand());
       if (ptr.kind == PtrKind::Invalid) return false;
       if (ptr.kind == PtrKind::FuncConst) {
-        if (auto *gv = llvm::dyn_cast<llvm::GlobalVariable>(li->getPointerOperand())) {
+        if (auto *gv = llvm::dyn_cast<llvm::GlobalVariable>(li->getPointerOperand()->stripPointerCasts())) {
           auto it = fc_map.find(gv);
           if (it != fc_map.end()) {
-            if (it->second.is_air_bool && li->getType()->isIntegerTy(8)) {
-              uint32_t u8 = spv.get_int(8);
-              uint32_t c1 = spv.get_const_int(8, 1);
-              uint32_t c0 = spv.get_const_int(8, 0);
-              if (!u8 || !c1 || !c0) return false;
-              uint32_t sel = spv.alloc_id();
-              spv.emit_op(cur_body, spv::OpSelect, {u8, sel, it->second.spv_id, c1, c0});
-              val_map[li] = sel;
-              return spv.error.empty();
+            if (it->second.is_air_bool) {
+              if (li->getType()->isIntegerTy(8)) {
+                uint32_t u8 = spv.get_int(8);
+                uint32_t c1 = spv.get_const_int(8, 1);
+                uint32_t c0 = spv.get_const_int(8, 0);
+                if (!u8 || !c1 || !c0) return false;
+                uint32_t sel = spv.alloc_id();
+                spv.emit_op(cur_body, spv::OpSelect, {u8, sel, it->second.spv_id, c1, c0});
+                val_map[li] = sel;
+                return spv.error.empty();
+              }
+              if (li->getType()->isIntegerTy(1)) {
+                val_map[li] = it->second.spv_id;
+                return true;
+              }
+              return spv.fail("boolean function constant load type mismatch");
+            }
+            if (li->getType() != it->second.type) {
+              return spv.fail("function constant load type mismatch");
             }
             val_map[li] = it->second.spv_id;
             return true;
@@ -3627,12 +4497,11 @@ struct Compiler {
       if (ptr.kind == PtrKind::Invalid || ptr.kind == PtrKind::FuncConst) {
         return spv.fail("invalid store destination");
       }
-      if (ptr.kind == PtrKind::Buffer &&
-          (ptr.base_id >= kMaxBufferSlots || buffers[ptr.base_id].readonly)) {
+      if (is_ptr_readonly(ptr)) {
         return spv.fail("store to readonly buffer binding");
       }
       if (si->getValueOperand()->getType()->isPointerTy()) {
-        if (ptr.kind != PtrKind::Function || !ptr_alloca_roots.count(ptr.base_id)) {
+        if (ptr.is_dual() || ptr.kind != PtrKind::Function || !ptr_alloca_roots.count(ptr.base_id)) {
           return spv.fail("pointer store only supported to single-root function alloca");
         }
         llvm::Value *sv = si->getValueOperand();
@@ -3642,7 +4511,7 @@ struct Compiler {
           off = spv.get_const_u32(0);
         } else {
           PtrInfo vp = resolve_ptr(sv);
-          if (vp.kind == PtrKind::Invalid) return false;
+          if (vp.kind == PtrKind::Invalid || vp.is_dual()) return spv.fail("dual-root pointer cannot be stored to alloca");
           auto root = ptr_alloca_roots[ptr.base_id];
           if (vp.kind != root.first || vp.base_id != root.second) {
             return spv.fail("pointer store root mismatch in function alloca");
@@ -3658,10 +4527,7 @@ struct Compiler {
           if (!emit_mem_store_ptr(ptr, u32_ty, spv.get_const_u32(static_cast<uint32_t>(val)))) {
             return false;
           }
-          PtrInfo hi = ptr;
-          hi.byte_off_id = emit_u32_add(materialize_byte_off(ptr), spv.get_const_u32(4u));
-          hi.idx_id = 0;
-          hi.idx_scale = 0;
+          PtrInfo hi = shift_ptr_bytes(ptr, 4u);
           return emit_mem_store_ptr(hi, u32_ty,
                                     spv.get_const_u32(static_cast<uint32_t>(val >> 32)));
         }
@@ -3673,11 +4539,10 @@ struct Compiler {
 
     if (auto *rmw = llvm::dyn_cast<llvm::AtomicRMWInst>(&inst)) {
       PtrInfo ptr = resolve_ptr(rmw->getPointerOperand());
-      if (ptr.kind != PtrKind::Buffer && ptr.kind != PtrKind::Workgroup) {
-        return spv.fail("atomicrmw requires buffer or workgroup memory");
+      if (ptr.is_dual() || (ptr.kind != PtrKind::Buffer && ptr.kind != PtrKind::Workgroup)) {
+        return spv.fail("atomicrmw requires single-root buffer or workgroup memory");
       }
-      if (ptr.kind == PtrKind::Buffer &&
-          (ptr.base_id >= kMaxBufferSlots || buffers[ptr.base_id].readonly)) {
+      if (is_ptr_readonly(ptr)) {
         return spv.fail("atomicrmw on readonly buffer binding");
       }
       if (!rmw->getType()->isIntegerTy(32)) return spv.fail("atomicrmw currently supports i32");
@@ -3727,6 +4592,14 @@ struct Compiler {
       if (uo->getOpcode() == llvm::Instruction::FNeg) {
         uint32_t a = get_val(uo->getOperand(0));
         if (!a) return false;
+        if (uo->getType()->getScalarType()->isBFloatTy()) {
+          uint32_t lanes = 1u;
+          if (auto *vt = llvm::dyn_cast<llvm::FixedVectorType>(uo->getType())) lanes = vt->getNumElements();
+          uint32_t id = spv.alloc_id();
+          spv.emit_op(cur_body, spv::OpBitwiseXor, {rty, id, a, splat_const_int(16, 0x8000u, lanes)});
+          val_map[uo] = id;
+          return spv.error.empty();
+        }
         uint32_t id = spv.alloc_id();
         spv.emit_op(cur_body, spv::OpFNegate, {rty, id, a});
         val_map[uo] = id;
@@ -3739,6 +4612,32 @@ struct Compiler {
       uint32_t a = get_val(bo->getOperand(0));
       uint32_t b = get_val(bo->getOperand(1));
       if (!a || !b) return false;
+      if (bo->getType()->getScalarType()->isBFloatTy()) {
+        spv::Op fop = spv::OpNop;
+        switch (bo->getOpcode()) {
+        case llvm::Instruction::FAdd: fop = spv::OpFAdd; break;
+        case llvm::Instruction::FSub: fop = spv::OpFSub; break;
+        case llvm::Instruction::FMul: fop = spv::OpFMul; break;
+        case llvm::Instruction::FDiv: fop = spv::OpFDiv; break;
+        case llvm::Instruction::FRem: fop = spv::OpFRem; break;
+        default: return spv.fail("unsupported bfloat binary operator");
+        }
+        uint32_t af = emit_bf16_to_f32(a, bo->getType());
+        uint32_t bf = emit_bf16_to_f32(b, bo->getType());
+        if (!af || !bf) return false;
+        uint32_t lanes = 1u;
+        if (auto *vt = llvm::dyn_cast<llvm::FixedVectorType>(bo->getType())) lanes = vt->getNumElements();
+        llvm::Type *f32_llvm = lanes > 1 ? static_cast<llvm::Type *>(
+                                               llvm::FixedVectorType::get(llvm::Type::getFloatTy(mod.getContext()), lanes))
+                                         : static_cast<llvm::Type *>(llvm::Type::getFloatTy(mod.getContext()));
+        uint32_t f32_ty = spv.map_llvm_type(f32_llvm);
+        uint32_t rf = spv.alloc_id();
+        spv.emit_op(cur_body, fop, {f32_ty, rf, af, bf});
+        uint32_t res = emit_f32_to_bf16(rf, f32_llvm);
+        if (!res) return false;
+        val_map[bo] = res;
+        return spv.error.empty();
+      }
       bool is_bool = bo->getType()->getScalarType()->isIntegerTy(1);
       if (is_bool && bo->getOpcode() != llvm::Instruction::And &&
           bo->getOpcode() != llvm::Instruction::Or &&
@@ -3796,6 +4695,9 @@ struct Compiler {
           PtrInfo pa = resolve_ptr(op0);
           PtrInfo pb = resolve_ptr(op1);
           if (pa.kind == PtrKind::Invalid || pb.kind == PtrKind::Invalid) return false;
+          if (pa.is_dual() || pb.is_dual()) {
+            return spv.fail("pointer comparison on dual-root selected pointer not supported");
+          }
           uint32_t same_addr = 0;
           if (pa.kind == pb.kind && pa.base_id == pb.base_id) {
             uint32_t oa = materialize_byte_off(pa);
@@ -3808,8 +4710,8 @@ struct Compiler {
             uint32_t idb = emit_pc_load(0u, pb.base_id);
             uint32_t same_id = spv.alloc_id();
             spv.emit_op(cur_body, spv::OpIEqual, {bty, same_id, ida, idb});
-            uint32_t off_a = emit_u32_add(emit_pc_load(1u, pa.base_id), materialize_byte_off(pa));
-            uint32_t off_b = emit_u32_add(emit_pc_load(1u, pb.base_id), materialize_byte_off(pb));
+            uint32_t off_a = emit_u32_add(emit_buf_pc_base_off(pa.base_id), materialize_byte_off(pa));
+            uint32_t off_b = emit_u32_add(emit_buf_pc_base_off(pb.base_id), materialize_byte_off(pb));
             uint32_t same_off = spv.alloc_id();
             spv.emit_op(cur_body, spv::OpIEqual, {bty, same_off, off_a, off_b});
             same_addr = spv.alloc_id();
@@ -3907,6 +4809,11 @@ struct Compiler {
       uint32_t a = get_val(fc->getOperand(0));
       uint32_t b = get_val(fc->getOperand(1));
       if (!a || !b) return false;
+      if (fc->getOperand(0)->getType()->getScalarType()->isBFloatTy()) {
+        a = emit_bf16_to_f32(a, fc->getOperand(0)->getType());
+        b = emit_bf16_to_f32(b, fc->getOperand(1)->getType());
+        if (!a || !b) return false;
+      }
       spv::Op op = spv::OpNop;
       switch (fc->getPredicate()) {
       case llvm::FCmpInst::FCMP_FALSE:
@@ -3973,6 +4880,37 @@ struct Compiler {
       llvm::Value *src_v = cast->getOperand(0);
       llvm::Type *sty = src_v->getType();
       llvm::Type *dty = cast->getType();
+      if (cast->getOpcode() == llvm::Instruction::PtrToInt) {
+        if (!dty->isIntegerTy()) return spv.fail("unsupported ptrtoint destination type");
+        uint32_t dbits = dty->getIntegerBitWidth();
+        if (dbits != 8u && dbits != 16u && dbits != 32u && dbits != 64u) {
+          return spv.fail("unsupported ptrtoint integer width");
+        }
+        uint32_t off32 = 0, hi32 = 0;
+        if (!emit_ptr_to_u32_pair(src_v, off32, hi32)) return false;
+        if (dbits == 64u) {
+          uint32_t u64 = spv.get_int(64);
+          if (!u64) return false;
+          uint32_t lo64 = spv.alloc_id();
+          spv.emit_op(cur_body, spv::OpUConvert, {u64, lo64, off32});
+          uint32_t hi64 = spv.alloc_id();
+          spv.emit_op(cur_body, spv::OpUConvert, {u64, hi64, hi32});
+          uint32_t sh = spv.alloc_id();
+          spv.emit_op(cur_body, spv::OpShiftLeftLogical, {u64, sh, hi64, spv.get_const_int(64, 32)});
+          uint32_t addr64 = spv.alloc_id();
+          spv.emit_op(cur_body, spv::OpBitwiseOr, {u64, addr64, sh, lo64});
+          val_map[cast] = addr64;
+          return spv.error.empty();
+        }
+        if (dbits == 32u) {
+          val_map[cast] = off32;
+          return spv.error.empty();
+        }
+        uint32_t res = spv.alloc_id();
+        spv.emit_op(cur_body, spv::OpUConvert, {rty, res, off32});
+        val_map[cast] = res;
+        return spv.error.empty();
+      }
       if (cast->getOpcode() == llvm::Instruction::Trunc && is_i64_index_only(src_v)) {
         uint32_t u32_src = get_index_u32(src_v);
         if (!u32_src) return false;
@@ -4054,14 +4992,23 @@ struct Compiler {
           (cast->getOpcode() == llvm::Instruction::UIToFP ||
            cast->getOpcode() == llvm::Instruction::SIToFP)) {
         llvm::Type *dsc = dty->getScalarType();
-        if (!dsc->isHalfTy() && !dsc->isFloatTy()) return spv.fail("unsupported bool-to-fp cast");
-        uint32_t bits = dsc->isHalfTy() ? 16u : 32u;
+        if (!dsc->isHalfTy() && !dsc->isFloatTy() && !dsc->isBFloatTy()) {
+          return spv.fail("unsupported bool-to-fp cast");
+        }
         bool is_signed = (cast->getOpcode() == llvm::Instruction::SIToFP);
-        uint64_t one_bits =
-            bits == 16u ? (is_signed ? 0xBC00ULL : 0x3C00ULL)
-                        : (is_signed ? 0xBF800000ULL : 0x3F800000ULL);
-        uint32_t c_one = spv.get_const_fp_bits(bits, one_bits);
-        uint32_t c_zero = spv.get_const_fp_bits(bits, 0u);
+        uint32_t c_one = 0;
+        uint32_t c_zero = 0;
+        if (dsc->isBFloatTy()) {
+          c_one = spv.get_const_int(16, is_signed ? 0xBF80ULL : 0x3F80ULL);
+          c_zero = spv.get_const_int(16, 0u);
+        } else {
+          uint32_t bits = dsc->isHalfTy() ? 16u : 32u;
+          uint64_t one_bits =
+              bits == 16u ? (is_signed ? 0xBC00ULL : 0x3C00ULL)
+                          : (is_signed ? 0xBF800000ULL : 0x3F800000ULL);
+          c_one = spv.get_const_fp_bits(bits, one_bits);
+          c_zero = spv.get_const_fp_bits(bits, 0u);
+        }
         if (!c_one || !c_zero) return false;
         if (auto *vt = llvm::dyn_cast<llvm::FixedVectorType>(dty)) {
           unsigned n = vt->getNumElements();
@@ -4084,6 +5031,8 @@ struct Compiler {
       if (dty->getScalarType()->isIntegerTy(1) &&
           (cast->getOpcode() == llvm::Instruction::FPToUI ||
            cast->getOpcode() == llvm::Instruction::FPToSI)) {
+        uint32_t fp_src = sty->getScalarType()->isBFloatTy() ? emit_bf16_to_f32(src, sty) : src;
+        if (!fp_src) return false;
         uint32_t u32 = spv.get_int(32);
         uint32_t mid_ty = u32;
         uint32_t c_one = spv.get_const_u32(1u);
@@ -4106,7 +5055,7 @@ struct Compiler {
         spv.emit_op(cur_body,
                     cast->getOpcode() == llvm::Instruction::FPToSI ? spv::OpConvertFToS
                                                                    : spv::OpConvertFToU,
-                    {mid_ty, iv, src});
+                    {mid_ty, iv, fp_src});
         uint32_t masked = spv.alloc_id();
         spv.emit_op(cur_body, spv::OpBitwiseAnd, {mid_ty, masked, iv, c_one});
         uint32_t id = spv.alloc_id();
@@ -4121,6 +5070,69 @@ struct Compiler {
                          cast->getOpcode() == llvm::Instruction::BitCast)) {
         val_map[cast] = src;
         return true;
+      }
+
+      /* Software IEEE-754 bfloat16 cast lowering (bfloat is represented as u16 in SPIR-V). */
+      bool src_is_bf16 = sty->getScalarType()->isBFloatTy();
+      bool dst_is_bf16 = dty->getScalarType()->isBFloatTy();
+      if (src_is_bf16 || dst_is_bf16) {
+        if (cast->getOpcode() == llvm::Instruction::BitCast) {
+          uint32_t sty_spv = spv.map_llvm_type(sty);
+          if (!sty_spv) return false;
+          if (sty_spv == rty) {
+            val_map[cast] = src;
+            return true;
+          }
+          uint32_t id = spv.alloc_id();
+          spv.emit_op(cur_body, spv::OpBitcast, {rty, id, src});
+          val_map[cast] = id;
+          return spv.error.empty();
+        }
+        uint32_t lanes = 1u;
+        if (auto *vt = llvm::dyn_cast<llvm::FixedVectorType>(dty)) lanes = vt->getNumElements();
+        llvm::Type *f32_llvm = lanes > 1 ? static_cast<llvm::Type *>(
+                                               llvm::FixedVectorType::get(llvm::Type::getFloatTy(mod.getContext()), lanes))
+                                         : static_cast<llvm::Type *>(llvm::Type::getFloatTy(mod.getContext()));
+        uint32_t f32_spv = spv.map_llvm_type(f32_llvm);
+        if (!f32_spv) return false;
+        if (src_is_bf16) {
+          uint32_t f32_val = emit_bf16_to_f32(src, sty);
+          if (!f32_val) return false;
+          if (cast->getOpcode() == llvm::Instruction::FPExt && dty->getScalarType()->isFloatTy()) {
+            val_map[cast] = f32_val;
+            return spv.error.empty();
+          }
+          spv::Op op = spv::OpNop;
+          switch (cast->getOpcode()) {
+          case llvm::Instruction::FPExt:
+          case llvm::Instruction::FPTrunc: op = spv::OpFConvert; break;
+          case llvm::Instruction::FPToUI: op = spv::OpConvertFToU; break;
+          case llvm::Instruction::FPToSI: op = spv::OpConvertFToS; break;
+          default: return spv.fail("unsupported bfloat source cast in AIR");
+          }
+          uint32_t id = spv.alloc_id();
+          spv.emit_op(cur_body, op, {rty, id, f32_val});
+          val_map[cast] = id;
+          return spv.error.empty();
+        }
+        /* Destination is bfloat. */
+        uint32_t f32_val = src;
+        if (!sty->getScalarType()->isFloatTy()) {
+          spv::Op op = spv::OpNop;
+          switch (cast->getOpcode()) {
+          case llvm::Instruction::FPExt:
+          case llvm::Instruction::FPTrunc: op = spv::OpFConvert; break;
+          case llvm::Instruction::UIToFP: op = spv::OpConvertUToF; break;
+          case llvm::Instruction::SIToFP: op = spv::OpConvertSToF; break;
+          default: return spv.fail("unsupported bfloat destination cast in AIR");
+          }
+          f32_val = spv.alloc_id();
+          spv.emit_op(cur_body, op, {f32_spv, f32_val, src});
+        }
+        uint32_t bf = emit_f32_to_bf16(f32_val, f32_llvm);
+        if (!bf) return false;
+        val_map[cast] = bf;
+        return spv.error.empty();
       }
 
       spv::Op op = spv::OpNop;
@@ -4294,14 +5306,50 @@ struct Compiler {
       }
 
       /* If Header's conditional branch keeps BOTH distinct arms inside L (inner if at header),
-         split Header after PHIs so Header emits OpLoopMerge + OpBranch Body cleanly. */
+         or Header contains a multi-root selected pointer memory op (which emits an inline
+         OpSelectionMerge diamond), split Header after PHIs so Header emits OpLoopMerge + OpBranch Body cleanly. */
+      bool need_header_split = false;
       if (auto *hbi = llvm::dyn_cast<llvm::BranchInst>(H->getTerminator())) {
         if (hbi->isConditional() && hbi->getSuccessor(0) != hbi->getSuccessor(1) &&
             L->contains(hbi->getSuccessor(0)) && L->contains(hbi->getSuccessor(1))) {
-          llvm::Instruction *split_pt = H->getFirstNonPHI();
-          llvm::BasicBlock *Body = H->splitBasicBlock(split_pt, ".spv.loop.body");
-          L->addBasicBlockToLoop(Body, LI);
+          need_header_split = true;
         }
+      }
+      if (!need_header_split) {
+        std::vector<std::pair<PtrKind, uint32_t>> hroots;
+        for (llvm::Instruction &hi : *H) {
+          const llvm::Value *hptr = nullptr;
+          if (auto *li = llvm::dyn_cast<llvm::LoadInst>(&hi)) {
+            hptr = li->getPointerOperand();
+          } else if (auto *si = llvm::dyn_cast<llvm::StoreInst>(&hi)) {
+            hptr = si->getPointerOperand();
+          } else if (auto *ci = llvm::dyn_cast<llvm::CallInst>(&hi)) {
+            if (llvm::Function *cf = ci->getCalledFunction()) {
+              llvm::StringRef cn = cf->getName();
+              if ((cn.starts_with("llvm.memset.") || cn.starts_with("llvm.memcpy.") ||
+                   cn.starts_with("llvm.memmove.")) && ci->arg_size() >= 3) {
+                if (collect_ptr_roots(ci->getArgOperand(0), hroots) && hroots.size() > 1) {
+                  need_header_split = true;
+                  break;
+                }
+                if (!cn.starts_with("llvm.memset.") &&
+                    collect_ptr_roots(ci->getArgOperand(1), hroots) && hroots.size() > 1) {
+                  need_header_split = true;
+                  break;
+                }
+              }
+            }
+          }
+          if (hptr && collect_ptr_roots(hptr, hroots) && hroots.size() > 1) {
+            need_header_split = true;
+            break;
+          }
+        }
+      }
+      if (need_header_split) {
+        llvm::Instruction *split_pt = H->getFirstNonPHI();
+        llvm::BasicBlock *Body = H->splitBasicBlock(split_pt, ".spv.loop.body");
+        L->addBasicBlockToLoop(Body, LI);
       }
 
       claimed_targets.insert(Latch);
@@ -4460,11 +5508,26 @@ struct Compiler {
         if (phi.getType()->isPointerTy()) {
           PtrKind pk = PtrKind::Invalid;
           uint32_t base = 0;
-          if (!trace_ptr_root(&phi, pk, base, phi_trace_cache)) {
-            return spv.fail("pointer PHI merges incompatible memory objects");
-          }
+          PtrInfo info{};
           uint32_t off_id = spv.alloc_id();
-          PtrInfo info{pk, base, off_id, 0, 0};
+          if (trace_ptr_root(&phi, pk, base, phi_trace_cache)) {
+            info = PtrInfo{pk, base, off_id, 0, 0};
+          } else {
+            std::vector<std::pair<PtrKind, uint32_t>> roots;
+            if (!collect_ptr_roots(&phi, roots) || roots.size() != 2) {
+              return spv.fail("pointer PHI merges incompatible memory objects");
+            }
+            auto root_key = [](const std::pair<PtrKind, uint32_t> &r) {
+              return std::make_pair(static_cast<uint8_t>(r.first), r.second);
+            };
+            if (root_key(roots[1]) < root_key(roots[0])) {
+              std::swap(roots[0], roots[1]);
+            }
+            uint32_t alt_off_id = spv.alloc_id();
+            uint32_t sel_id = spv.alloc_id();
+            info = PtrInfo{roots[0].first, roots[0].second, off_id, 0, 0,
+                           sel_id, roots[1].first, roots[1].second, alt_off_id};
+          }
           ptr_phi_info[&phi] = info;
           ptr_map[&phi] = info;
           phi_ids[&phi] = off_id;
@@ -4492,10 +5555,24 @@ struct Compiler {
 
     for (size_t bi = 0; bi < order.size(); bi++) {
       llvm::BasicBlock *bb = order[bi];
+      cur_bb = bb;
+      cur_exit_label = bb_label[bb];
       cur_body.clear();
 
-      /* Entry block: load builtin kernel arguments right after function OpVariables. */
+      /* Entry block: load builtin kernel arguments and sub-aligned SSBO base offsets. */
       if (bi == 0) {
+        uint32_t salign = spv.hw_caps.ssbo_offset_align;
+        if (salign > 1u && (salign & (salign - 1u)) == 0) {
+          uint32_t mask = spv.get_const_u32(salign - 1u);
+          uint32_t u32 = spv.get_int(32);
+          for (uint32_t s = 0; s < 16u; s++) {
+            if (!buffers[s].used) continue;
+            uint32_t raw_off = emit_pc_load(1u, s);
+            uint32_t sub_off = spv.alloc_id();
+            spv.emit_op(cur_body, spv::OpBitwiseAnd, {u32, sub_off, raw_off, mask});
+            buf_sub_off_ids[s] = sub_off;
+          }
+        }
         for (unsigned a = 0; a < fn.arg_size(); a++) {
           const KernelArgMeta &am = arg_meta[a];
           if (am.builtin != BuiltinKind::None) {
@@ -4541,8 +5618,10 @@ struct Compiler {
         return spv.fail("unsupported terminator instruction");
       }
 
+      bb_exit_label[bb] = cur_exit_label;
       bb_bodies[bb] = std::move(cur_body);
     }
+    cur_bb = nullptr;
 
     /* Populate OpPhi instructions now that all block instructions (including backedges) exist. */
     for (llvm::BasicBlock *bb : order) {
@@ -4550,6 +5629,78 @@ struct Compiler {
       for (llvm::PHINode &phi : bb->phis()) {
         uint32_t id = phi_ids[&phi];
         bool is_narrow_i64 = narrowed_i64_phis.count(&phi) != 0;
+        auto pit = phi.getType()->isPointerTy() ? ptr_phi_info.find(&phi) : ptr_phi_info.end();
+        if (pit != ptr_phi_info.end() && pit->second.is_dual()) {
+          const PtrInfo &dinfo = pit->second;
+          uint32_t u32 = spv.get_int(32);
+          uint32_t bty = spv.get_bool();
+          std::vector<uint32_t> o0_args = {u32, dinfo.byte_off_id};
+          std::vector<uint32_t> o1_args = {u32, dinfo.alt_byte_off_id};
+          std::vector<uint32_t> sel_args = {bty, dinfo.sel_cond_id};
+          struct DualInc { uint32_t o0, o1, sel; };
+          std::unordered_map<uint32_t, DualInc> seen_pred;
+          for (unsigned k = 0; k < phi.getNumIncomingValues(); k++) {
+            llvm::BasicBlock *pred = phi.getIncomingBlock(k);
+            auto lit = bb_exit_label.find(pred);
+            if (lit == bb_exit_label.end()) continue;
+            llvm::Value *inc = phi.getIncomingValue(k);
+            DualInc di{0, 0, 0};
+            if (llvm::isa<llvm::UndefValue>(inc) || llvm::isa<llvm::PoisonValue>(inc)) {
+              di = {spv.get_undef(u32), spv.get_undef(u32), spv.get_undef(bty)};
+            } else if (llvm::isa<llvm::ConstantPointerNull>(inc)) {
+              di = {spv.get_const_u32(0), spv.get_const_u32(0), spv.get_const_bool(true)};
+            } else {
+              cur_body.clear();
+              PtrInfo p = resolve_ptr(inc);
+              if (p.kind == PtrKind::Invalid) return false;
+              if (!p.is_dual()) {
+                uint32_t off_v = materialize_byte_off(p);
+                if (!cur_body.empty()) {
+                  return spv.fail("non-materialized constant GEP in dual pointer PHI");
+                }
+                if (p.kind == dinfo.kind && p.base_id == dinfo.base_id) {
+                  di = {off_v, spv.get_const_u32(0), spv.get_const_bool(true)};
+                } else if (p.kind == dinfo.alt_kind && p.base_id == dinfo.alt_base_id) {
+                  di = {spv.get_const_u32(0), off_v, spv.get_const_bool(false)};
+                } else {
+                  return spv.fail("pointer PHI merges more than two memory objects");
+                }
+              } else {
+                if (p.kind == dinfo.kind && p.base_id == dinfo.base_id &&
+                    p.alt_kind == dinfo.alt_kind && p.alt_base_id == dinfo.alt_base_id) {
+                  uint32_t o0 = materialize_byte_off(p.primary_arm());
+                  uint32_t o1 = materialize_byte_off(p.alt_arm());
+                  if (!cur_body.empty()) {
+                    return spv.fail("non-materialized constant GEP in dual pointer PHI");
+                  }
+                  di = {o0, o1, p.sel_cond_id};
+                } else {
+                  return spv.fail("incompatible dual pointer incoming value in pointer PHI");
+                }
+              }
+            }
+            auto sit = seen_pred.find(lit->second);
+            if (sit != seen_pred.end()) {
+              if (sit->second.o0 != di.o0 || sit->second.o1 != di.o1 || sit->second.sel != di.sel) {
+                return spv.fail("conflicting PHI values for duplicate predecessor");
+              }
+              continue;
+            }
+            seen_pred[lit->second] = di;
+            o0_args.push_back(di.o0);
+            o0_args.push_back(lit->second);
+            o1_args.push_back(di.o1);
+            o1_args.push_back(lit->second);
+            sel_args.push_back(di.sel);
+            sel_args.push_back(lit->second);
+          }
+          if (seen_pred.empty()) {
+            return spv.fail("PHI node has no reachable predecessors");
+          }
+          spv.emit_op_vec(phi_words, spv::OpPhi, o0_args);
+          spv.emit_op_vec(phi_words, spv::OpPhi, o1_args);
+          spv.emit_op_vec(phi_words, spv::OpPhi, sel_args);
+        } else {
         uint32_t ty = (phi.getType()->isPointerTy() || is_narrow_i64)
                           ? spv.get_int(32)
                           : spv.map_llvm_type(phi.getType());
@@ -4557,8 +5708,8 @@ struct Compiler {
         std::unordered_map<uint32_t, uint32_t> seen_pred;
         for (unsigned k = 0; k < phi.getNumIncomingValues(); k++) {
           llvm::BasicBlock *pred = phi.getIncomingBlock(k);
-          auto lit = bb_label.find(pred);
-          if (lit == bb_label.end()) continue; /* skip unreachable pred */
+          auto lit = bb_exit_label.find(pred);
+          if (lit == bb_exit_label.end()) continue; /* skip unreachable pred */
           llvm::Value *inc = phi.getIncomingValue(k);
           uint32_t inc_id = 0;
           if (phi.getType()->isPointerTy()) {
@@ -4569,7 +5720,7 @@ struct Compiler {
             } else {
               cur_body.clear();
               PtrInfo p = resolve_ptr(inc);
-              if (p.kind == PtrKind::Invalid) return false;
+              if (p.kind == PtrKind::Invalid || p.is_dual()) return false;
               inc_id = materialize_byte_off(p);
               if (!cur_body.empty()) {
                 return spv.fail("non-materialized constant GEP in pointer PHI");
@@ -4600,6 +5751,7 @@ struct Compiler {
           return spv.fail("PHI node has no reachable predecessors");
         }
         spv.emit_op_vec(phi_words, spv::OpPhi, args);
+        }
         if (phi.getType()->isPointerTy()) {
           auto nit = ptr_phi_null_ids.find(&phi);
           if (nit != ptr_phi_null_ids.end()) {
@@ -4607,8 +5759,8 @@ struct Compiler {
             std::unordered_map<uint32_t, uint32_t> nseen;
             for (unsigned k = 0; k < phi.getNumIncomingValues(); k++) {
               llvm::BasicBlock *pred = phi.getIncomingBlock(k);
-              auto lit = bb_label.find(pred);
-              if (lit == bb_label.end()) continue;
+              auto lit = bb_exit_label.find(pred);
+              if (lit == bb_exit_label.end()) continue;
               uint32_t nid = get_ptr_is_null(phi.getIncomingValue(k));
               if (nseen.count(lit->second)) continue;
               nseen[lit->second] = nid;

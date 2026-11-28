@@ -64,6 +64,14 @@ struct CliConfig {
     vk_worker: Option<PathBuf>,
 }
 
+fn default_linux_gpu_mib(memory_mib: usize) -> usize {
+    if memory_mib >= 2048 {
+        (memory_mib / 2).min(1024)
+    } else {
+        DEFAULT_LINUX_GPU_MIB
+    }
+}
+
 fn usage() -> ! {
     eprintln!(
         "usage: kido-vmm --kernel PATH --initrd PATH [--disk PATH [--disk-base PATH]] \
@@ -211,7 +219,7 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<CliConfig, Stri
     }
     if gpu {
         if gpu_memory_mib == 0 {
-            gpu_memory_mib = DEFAULT_LINUX_GPU_MIB;
+            gpu_memory_mib = default_linux_gpu_mib(memory_mib);
         }
         if !(MIN_GPU_MIB..=MAX_GPU_MIB).contains(&gpu_memory_mib) {
             return Err(format!(
@@ -791,5 +799,51 @@ mod tests {
             .map(String::from),
         )
         .is_err());
+    }
+
+    #[test]
+    fn gpu_memory_default_scales_with_ram_and_allows_explicit_override() {
+        let small = parse_args(
+            ["kido-vmm", "--kernel", "/k", "--initrd", "/i", "--memory", "1024", "--gpu"]
+                .into_iter()
+                .map(String::from),
+        )
+        .unwrap();
+        assert_eq!(small.gpu_memory_mib, 512);
+
+        let medium = parse_args(
+            ["kido-vmm", "--kernel", "/k", "--initrd", "/i", "--memory", "2048", "--gpu"]
+                .into_iter()
+                .map(String::from),
+        )
+        .unwrap();
+        assert_eq!(medium.gpu_memory_mib, 1024);
+
+        let large = parse_args(
+            ["kido-vmm", "--kernel", "/k", "--initrd", "/i", "--memory", "4096", "--gpu"]
+                .into_iter()
+                .map(String::from),
+        )
+        .unwrap();
+        assert_eq!(large.gpu_memory_mib, 1024);
+
+        let explicit = parse_args(
+            [
+                "kido-vmm",
+                "--kernel",
+                "/k",
+                "--initrd",
+                "/i",
+                "--memory",
+                "4096",
+                "--gpu",
+                "--gpu-memory",
+                "1536",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap();
+        assert_eq!(explicit.gpu_memory_mib, 1536);
     }
 }

@@ -66,8 +66,9 @@ static const char *kTestMSL =
 
 int main(void) {
   char names[512];
+  size_t needed = msl_extract_kernel_names(kTestMSL, strlen(kTestMSL), NULL, 0);
   size_t nlen = msl_extract_kernel_names(kTestMSL, strlen(kTestMSL), names, sizeof(names));
-  assert(nlen > 0);
+  assert(needed > 0 && needed == nlen);
   assert(strcmp(names, "saxpy") == 0);
 
   msl_translate_result_t res;
