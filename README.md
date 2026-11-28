@@ -97,19 +97,34 @@ encrypted and authenticated channel. [docs/security.md](docs/security.md) explai
   [open an issue](https://github.com/kido-sh/darwin/issues) with the tool's name.
 - Apple's own binaries do not run, because they are built for arm64e.
 - Tools built only for x86_64 do not run, because there is no Rosetta. GUI apps do not run either.
-- `-v` mounts a directory live, in beta, only on the Virtualization.framework backend, with an image that
-  supports it. Files, mounts on Linux KVM or QEMU or of an image without support, and the mounts of a
-  container created with `--copy-mounts` are copied in and out.
-- There is no USB passthrough and no GPU.
+- `-v` mounts a directory live on both macOS (Virtualization.framework) and ARM64 Linux (built-in
+  VirtIO-FS in `kido-vmm`). Files, mounts on QEMU or older images without VirtIO-FS support, and
+  mounts created with `--copy-mounts` are copied in and out.
+- Metal 3 compute GPU acceleration is supported on Apple Silicon macOS (host Metal) and supported
+  ARM64 Linux Vulkan GPUs (see [Supported Linux Hardware](https://kido.sh/docs/linux-hardware/gpu/)).
+  There is no USB passthrough.
 
-kido is experimental. Commands and the image format may still change.
+kido is experimental. Commands and the image format may still change. Want to try arm64 Darwin and
+Metal 3 compute without installing anything? Boot it in your browser at
+[play.kido.sh](https://play.kido.sh) ([kido-sh/kido-wasm](https://github.com/kido-sh/kido-wasm)).
 
-## System libraries
+## System libraries (kl)
 
-The base image is kept small. kl, KidoDarwin's package manager, will install the other system
-libraries and frameworks where macOS keeps them, so `kl add libsqlite3` fixes a `Library not loaded`
-for `/usr/lib/libsqlite3.dylib`. kl is still being built, and its repository is not online yet.
-[docs/kl.md](docs/kl.md) describes how it works.
+The base image is kept small (~30 MB). `kl`, KidoDarwin's signed system package manager, ships in
+the base image and installs permissive, zero-GPL macOS system libraries and runtimes from
+`https://kl.kido.sh` into their standard Darwin paths:
+
+```console
+$ kido run -it --rm darwin /bin/sh
+# kl update
+# kl add standard swift-runtime
+# python3 --version
+Python 3.13.14
+```
+
+Both portable `arm64` and Apple Silicon `arm64e` (PAC) packages are published. See
+[docs/kl.md](docs/kl.md) and [kido.sh/docs/kl](https://kido.sh/docs/kl/) for commands, mirror
+configuration, and the Ed25519 + SHA-256 verification model.
 
 ## Troubleshooting
 

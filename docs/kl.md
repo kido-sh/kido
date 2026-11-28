@@ -4,15 +4,21 @@ kl installs the system libraries and frameworks that KidoDarwin's base image lea
 one where macOS keeps it, under the same install name, so tools built for macOS find it. kl runs
 inside a container.
 
-kl is still being built. Its package repository at kl.kido.sh is not online yet, and the image does
-not include kl yet.
+kl ships in the KidoDarwin base image (`/usr/bin/kl` with `/etc/kl.conf`) and pulls Ed25519-signed
+packages from `https://kl.kido.sh` for both portable `arm64` and Apple Silicon `arm64e`.
 
 ```console
-$ kl add libsqlite3
-$ kl which /usr/lib/libsqlite3.dylib
-/usr/lib/libsqlite3.dylib: libsqlite3
-$ kl list
-libsqlite3 3.51.0
+# kl update
+# kl add standard swift-runtime
+# kl which /usr/bin/python3
+/usr/bin/python3: python3
+# kl list
+libffi 3.5.2 (dependency)
+libxml2 2.15.3 (dependency)
+python3 3.13.14 (dependency)
+standard 1.0.0
+swift-runtime 5.10.1
+# kl verify
 ```
 
 ## Commands
@@ -60,7 +66,7 @@ Examples:
 
 - `https://kl.kido.sh/v1/26/1/1/24B52/latest/` (macOS 26.1.1 beta build `24B52`)
 - `https://kl.kido.sh/v1/26/1/1/24B56/latest/` (macOS 26.1.1 release build `24B56`)
-- `https://kl.kido.sh/v1/26/5/0/25F79/latest/` (macOS 26.5 padded to three segments)
+- `https://kl.kido.sh/v1/26/5/0/25F74/latest/` (macOS 26.5 padded to three segments)
 - `https://kl.kido.sh/v1/27/0/0/26B118/latest/` (macOS 27.0 padded to three segments)
 - `https://kl.kido.sh/v1/blobs/sha256/<digest>` (shared content-addressed blobs across all OS
   versions, builds, and channels under `v1`)
@@ -79,7 +85,7 @@ mirror = https://kl-cache.corp.example/kl
 mirror = http://10.0.1.10:8080
 kl_version = v1
 os_version = 26.5
-os_build = 25F79
+os_build = 25F74
 channel = latest
 arch = arm64e
 ```
