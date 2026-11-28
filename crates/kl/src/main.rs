@@ -485,3 +485,14 @@ fn host_arch() -> String {
     }
     "arm64".to_owned()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn embedded_trusted_keys_parse() {
+        let keys = TrustedKeys::parse(EMBEDDED_KEYS).expect("embedded trusted.pub must parse");
+        assert!(!keys.is_empty(), "embedded trusted.pub must not be empty");
+    }
+}

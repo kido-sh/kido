@@ -56,10 +56,11 @@ pub fn check_name(name: &str) -> Result<()> {
     ensure!(
         !name.is_empty()
             && name.len() <= 64
-            && !name.starts_with(['.', '-'])
+            && !name.starts_with(['.', '-', '@'])
+            && !name.ends_with('@')
             && name
                 .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"-_.+".contains(&b)),
+                .all(|b| b.is_ascii_alphanumeric() || b"-_.+@".contains(&b)),
         "bad package name {name:?}"
     );
     Ok(())
@@ -357,10 +358,21 @@ mod tests {
 
     #[test]
     fn names_are_restricted() {
-        for bad in ["", ".hidden", "-rf", "a/b", "a b", &"x".repeat(65)] {
+        for bad in [
+            "",
+            ".hidden",
+            "-rf",
+            "@ruby",
+            "ruby@",
+            "a/b",
+            "a b",
+            &"x".repeat(65),
+        ] {
             assert!(check_name(bad).is_err(), "{bad:?} was accepted");
         }
         check_name("libsqlite3").unwrap();
         check_name("c++-runtime").unwrap();
+        check_name("ruby@2.6").unwrap();
+        check_name("python@3.13").unwrap();
     }
 }
