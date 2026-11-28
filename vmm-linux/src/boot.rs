@@ -16,8 +16,16 @@ pub const INITRD_ALIGN: u64 = 0x1000;
 
 pub const GICD_BASE: u64 = 0x0800_0000;
 pub const GICD_SIZE: u64 = 0x0001_0000;
+pub const GICC_BASE: u64 = 0x0801_0000;
+pub const GICC_SIZE: u64 = 0x0001_0000;
 pub const GICR_BASE: u64 = 0x080a_0000;
 pub const GICR_SIZE: u64 = 0x00f6_0000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GicVersion {
+    V2,
+    V3,
+}
 
 pub const PL011_BASE: u64 = 0x0900_0000;
 pub const PL011_SIZE: u64 = 0x1000;
@@ -197,6 +205,7 @@ pub struct FdtConfig<'a> {
     pub ram_base: u64,
     pub ram_size: u64,
     pub cpu_mpidrs: &'a [u64],
+    pub gic_version: GicVersion,
     pub ecam: EcamLayout,
     pub boot_args: &'a str,
     pub initrd_start: u64,
@@ -361,6 +370,13 @@ pub fn build_fdt(cfg: &FdtConfig<'_>) -> Result<Vec<u8>, String> {
     fdt.end_node(psci).map_err(|e| format!("end psci: {e}"))?;
 
     // /timer
+    let ppi_flags = match cfg.gic_version {
+        GicVersion::V3 => 0x104,
+        GicVersion::V2 => {
+            let mask = (1u32 << cfg.cpu_mpidrs.len().min(8)) - 1;
+            (mask << 8) | 0x4
+        }
+    };
     let timer = fdt
         .begin_node("timer")
         .map_err(|e| format!("begin timer: {e}"))?;
@@ -371,10 +387,10 @@ pub fn build_fdt(cfg: &FdtConfig<'_>) -> Result<Vec<u8>, String> {
     fdt.property_array_u32(
         "interrupts",
         &[
-            1, 13, 0x104, // Secure physical timer (PPI 13 -> INTID 29)
-            1, 14, 0x104, // Non-secure physical timer (PPI 14 -> INTID 30)
-            1, 11, 0x104, // Virtual timer (PPI 11 -> INTID 27)
-            1, 10, 0x104, // Hypervisor timer (PPI 10 -> INTID 26)
+            1, 13, ppi_flags, // Secure physical timer (PPI 13 -> INTID 29)
+            1, 14, ppi_flags, // Non-secure physical timer (PPI 14 -> INTID 30)
+            1, 11, ppi_flags, // Virtual timer (PPI 11 -> INTID 27)
+            1, 10, ppi_flags, // Hypervisor timer (PPI 10 -> INTID 26)
         ],
     )
     .map_err(|e| format!("timer interrupts: {e}"))?;
@@ -400,8 +416,16 @@ pub fn build_fdt(cfg: &FdtConfig<'_>) -> Result<Vec<u8>, String> {
     let intc = fdt
         .begin_node("intc@8000000")
         .map_err(|e| format!("begin intc: {e}"))?;
-    fdt.property_string("compatible", "arm,gic-v3")
-        .map_err(|e| format!("intc compatible: {e}"))?;
+    match cfg.gic_version {
+        GicVersion::V3 => {
+            fdt.property_string("compatible", "arm,gic-v3")
+                .map_err(|e| format!("intc compatible: {e}"))?;
+        }
+        GicVersion::V2 => {
+            fdt.property_string("compatible", "arm,cortex-a15-gic")
+                .map_err(|e| format!("intc compatible: {e}"))?;
+        }
+    }
     fdt.property_null("interrupt-controller")
         .map_err(|e| format!("intc interrupt-controller: {e}"))?;
     fdt.property_u32("#interrupt-cells", 3)
@@ -414,8 +438,16 @@ pub fn build_fdt(cfg: &FdtConfig<'_>) -> Result<Vec<u8>, String> {
         .map_err(|e| format!("intc ranges: {e}"))?;
     fdt.property_phandle(GIC_PHANDLE)
         .map_err(|e| format!("intc phandle: {e}"))?;
-    fdt.property_array_u64("reg", &[GICD_BASE, GICD_SIZE, GICR_BASE, GICR_SIZE])
-        .map_err(|e| format!("intc reg: {e}"))?;
+    match cfg.gic_version {
+        GicVersion::V3 => {
+            fdt.property_array_u64("reg", &[GICD_BASE, GICD_SIZE, GICR_BASE, GICR_SIZE])
+                .map_err(|e| format!("intc reg: {e}"))?;
+        }
+        GicVersion::V2 => {
+            fdt.property_array_u64("reg", &[GICD_BASE, GICD_SIZE, GICC_BASE, GICC_SIZE])
+                .map_err(|e| format!("intc reg: {e}"))?;
+        }
+    }
     fdt.end_node(intc).map_err(|e| format!("end intc: {e}"))?;
 
     // /pl011@9000000
@@ -643,6 +675,7 @@ mod tests {
             ram_base: RAM_BASE,
             ram_size: 1024 * 1024 * 1024,
             cpu_mpidrs: &mpidrs,
+            gic_version: GicVersion::V3,
             ecam: ecam_layout_for_pa_bits(40),
             boot_args: "serial=3 ext4-uuid=abc",
             initrd_start: 0x4040_0000,
@@ -704,6 +737,7 @@ mod tests {
             ram_base: RAM_BASE,
             ram_size: 512 * 1024 * 1024,
             cpu_mpidrs: &[0x8000_0000],
+            gic_version: GicVersion::V2,
             ecam: ecam_layout_for_pa_bits(36),
             boot_args: "serial=3",
             initrd_start: 0x4040_0000,
@@ -712,6 +746,27 @@ mod tests {
         })
         .unwrap();
         let props_low = collect_fdt_paths_and_props(&dtb_low);
+        let gic2_compat = props_low
+            .iter()
+            .find(|(p, n, _)| p == "/intc@8000000" && n == "compatible")
+            .unwrap()
+            .2
+            .clone();
+        assert_eq!(gic2_compat, b"arm,cortex-a15-gic\0");
+        let gic2_reg = props_low
+            .iter()
+            .find(|(p, n, _)| p == "/intc@8000000" && n == "reg")
+            .unwrap()
+            .2
+            .clone();
+        assert_eq!(
+            u64::from_be_bytes(gic2_reg[16..24].try_into().unwrap()),
+            GICC_BASE
+        );
+        assert_eq!(
+            u64::from_be_bytes(gic2_reg[24..32].try_into().unwrap()),
+            GICC_SIZE
+        );
         let reg_low = props_low
             .iter()
             .find(|(p, n, _)| p == "/pcie@10000000" && n == "reg")

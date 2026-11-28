@@ -13,16 +13,18 @@ use std::time::Duration;
 
 #[cfg(target_os = "linux")]
 use kvm_bindings::{
-    kvm_create_device, kvm_device_attr, kvm_device_type_KVM_DEV_TYPE_ARM_VGIC_V3, kvm_regs,
-    kvm_userspace_memory_region, kvm_vcpu_init, user_pt_regs, KVM_ARM_IRQ_NUM_MASK,
-    KVM_ARM_IRQ_TYPE_SHIFT, KVM_ARM_IRQ_TYPE_SPI, KVM_ARM_VCPU_POWER_OFF, KVM_ARM_VCPU_PSCI_0_2,
+    kvm_create_device, kvm_device_attr, kvm_device_type_KVM_DEV_TYPE_ARM_VGIC_V2,
+    kvm_device_type_KVM_DEV_TYPE_ARM_VGIC_V3, kvm_regs, kvm_userspace_memory_region,
+    kvm_vcpu_init, user_pt_regs, KVM_ARM_IRQ_NUM_MASK, KVM_ARM_IRQ_TYPE_SHIFT,
+    KVM_ARM_IRQ_TYPE_SPI, KVM_ARM_VCPU_POWER_OFF, KVM_ARM_VCPU_PSCI_0_2,
     KVM_DEV_ARM_VGIC_CTRL_INIT, KVM_DEV_ARM_VGIC_GRP_ADDR, KVM_DEV_ARM_VGIC_GRP_CTRL,
     KVM_DEV_ARM_VGIC_GRP_NR_IRQS, KVM_REG_ARM64, KVM_REG_ARM64_SYSREG,
     KVM_REG_ARM64_SYSREG_CRM_MASK, KVM_REG_ARM64_SYSREG_CRM_SHIFT, KVM_REG_ARM64_SYSREG_CRN_MASK,
     KVM_REG_ARM64_SYSREG_CRN_SHIFT, KVM_REG_ARM64_SYSREG_OP0_MASK, KVM_REG_ARM64_SYSREG_OP0_SHIFT,
     KVM_REG_ARM64_SYSREG_OP1_MASK, KVM_REG_ARM64_SYSREG_OP1_SHIFT, KVM_REG_ARM64_SYSREG_OP2_MASK,
     KVM_REG_ARM64_SYSREG_OP2_SHIFT, KVM_REG_ARM_CORE, KVM_REG_SIZE_U64, KVM_SYSTEM_EVENT_RESET,
-    KVM_SYSTEM_EVENT_SHUTDOWN, KVM_VGIC_V3_ADDR_TYPE_DIST, KVM_VGIC_V3_ADDR_TYPE_REDIST,
+    KVM_SYSTEM_EVENT_SHUTDOWN, KVM_VGIC_V2_ADDR_TYPE_CPU, KVM_VGIC_V2_ADDR_TYPE_DIST,
+    KVM_VGIC_V3_ADDR_TYPE_DIST, KVM_VGIC_V3_ADDR_TYPE_REDIST,
 };
 #[cfg(target_os = "linux")]
 use kvm_ioctls::{DeviceFd, Kvm, VcpuExit, VcpuFd, VmFd};
@@ -30,7 +32,7 @@ use kvm_ioctls::{DeviceFd, Kvm, VcpuExit, VcpuFd, VmFd};
 #[cfg(target_os = "linux")]
 use crate::affinity::pin_current_thread;
 #[cfg(target_os = "linux")]
-use crate::boot::{FDT_GPA, GICD_BASE, GICR_BASE, KERNEL_GPA};
+use crate::boot::{GicVersion, FDT_GPA, GICC_BASE, GICD_BASE, GICR_BASE, KERNEL_GPA};
 #[cfg(target_os = "linux")]
 use crate::irq::SpiBackend;
 #[cfg(target_os = "linux")]
@@ -221,6 +223,7 @@ struct PauseState {
 pub struct KvmVm {
     vcpus: Vec<VcpuFd>,
     _gic: DeviceFd,
+    gic_version: GicVersion,
     vm: Arc<VmFd>,
     _kvm: Kvm,
     _mem: Arc<GuestMemory>,
@@ -309,11 +312,12 @@ impl KvmVm {
             vcpus.push(vcpu);
         }
 
-        let gic = Self::init_vgic_v3(&vm)?;
+        let (gic, gic_version) = Self::init_vgic(&vm, num_cpus)?;
 
         Ok(Self {
             vcpus,
             _gic: gic,
+            gic_version,
             vm,
             _kvm: kvm,
             _mem: mem,
@@ -323,16 +327,44 @@ impl KvmVm {
         })
     }
 
-    fn init_vgic_v3(vm: &VmFd) -> Result<DeviceFd, String> {
-        let mut dev = kvm_create_device {
+    fn init_vgic(vm: &VmFd, num_cpus: usize) -> Result<(DeviceFd, GicVersion), String> {
+        let mut dev_v3 = kvm_create_device {
             type_: kvm_device_type_KVM_DEV_TYPE_ARM_VGIC_V3,
             fd: 0,
             flags: 0,
         };
-        let gic = vm
-            .create_device(&mut dev)
-            .map_err(|e| format!("KVM_CREATE_DEVICE(VGIC_V3): {e}"))?;
+        match vm.create_device(&mut dev_v3) {
+            Ok(gic) => {
+                Self::configure_vgic_v3(&gic)?;
+                Ok((gic, GicVersion::V3))
+            }
+            Err(e)
+                if matches!(
+                    e.errno(),
+                    libc::ENODEV | libc::ENXIO | libc::EOPNOTSUPP
+                ) =>
+            {
+                if num_cpus > 8 {
+                    return Err(format!(
+                        "GICv2 host supports at most 8 vCPUs (requested {num_cpus})"
+                    ));
+                }
+                let mut dev_v2 = kvm_create_device {
+                    type_: kvm_device_type_KVM_DEV_TYPE_ARM_VGIC_V2,
+                    fd: 0,
+                    flags: 0,
+                };
+                let gic = vm
+                    .create_device(&mut dev_v2)
+                    .map_err(|e2| format!("KVM_CREATE_DEVICE(VGIC_V2): {e2}"))?;
+                Self::configure_vgic_v2(&gic)?;
+                Ok((gic, GicVersion::V2))
+            }
+            Err(e) => Err(format!("KVM_CREATE_DEVICE(VGIC_V3): {e}")),
+        }
+    }
 
+    fn configure_vgic_v3(gic: &DeviceFd) -> Result<(), String> {
         let nr_irqs = VGIC_NR_IRQS;
         gic.set_device_attr(&kvm_device_attr {
             flags: 0,
@@ -368,7 +400,50 @@ impl KvmVm {
         })
         .map_err(|e| format!("VGIC_V3 CTRL_INIT: {e}"))?;
 
-        Ok(gic)
+        Ok(())
+    }
+
+    fn configure_vgic_v2(gic: &DeviceFd) -> Result<(), String> {
+        let nr_irqs = VGIC_NR_IRQS;
+        gic.set_device_attr(&kvm_device_attr {
+            flags: 0,
+            group: KVM_DEV_ARM_VGIC_GRP_NR_IRQS,
+            attr: 0,
+            addr: (&nr_irqs as *const u32) as u64,
+        })
+        .map_err(|e| format!("VGIC_V2 NR_IRQS={nr_irqs}: {e}"))?;
+
+        let dist_addr = GICD_BASE;
+        gic.set_device_attr(&kvm_device_attr {
+            flags: 0,
+            group: KVM_DEV_ARM_VGIC_GRP_ADDR,
+            attr: KVM_VGIC_V2_ADDR_TYPE_DIST as u64,
+            addr: (&dist_addr as *const u64) as u64,
+        })
+        .map_err(|e| format!("VGIC_V2 DIST={dist_addr:#x}: {e}"))?;
+
+        let cpu_addr = GICC_BASE;
+        gic.set_device_attr(&kvm_device_attr {
+            flags: 0,
+            group: KVM_DEV_ARM_VGIC_GRP_ADDR,
+            attr: KVM_VGIC_V2_ADDR_TYPE_CPU as u64,
+            addr: (&cpu_addr as *const u64) as u64,
+        })
+        .map_err(|e| format!("VGIC_V2 CPU={cpu_addr:#x}: {e}"))?;
+
+        gic.set_device_attr(&kvm_device_attr {
+            flags: 0,
+            group: KVM_DEV_ARM_VGIC_GRP_CTRL,
+            attr: KVM_DEV_ARM_VGIC_CTRL_INIT as u64,
+            addr: 0,
+        })
+        .map_err(|e| format!("VGIC_V2 CTRL_INIT: {e}"))?;
+
+        Ok(())
+    }
+
+    pub fn gic_version(&self) -> GicVersion {
+        self.gic_version
     }
 
     pub fn spi_backend(&self) -> Arc<dyn SpiBackend> {

@@ -329,6 +329,7 @@ fn run_vm(cfg: CliConfig) -> Result<(), String> {
         ram_base: RAM_BASE,
         ram_size: ram_size as u64,
         cpu_mpidrs: vm.mpidrs(),
+        gic_version: vm.gic_version(),
         ecam,
         boot_args: &boot_args,
         initrd_start: loaded.initrd_gpa,

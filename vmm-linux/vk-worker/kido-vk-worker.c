@@ -50,6 +50,7 @@ typedef struct {
   uint64_t handle;
   uint32_t client_id;
   uint64_t shm_offset;
+  uint64_t shm_len;
   uint64_t aligned_len;
   uint64_t requested_len;
   bool is_dmabuf;
@@ -159,6 +160,7 @@ typedef struct {
   VkPhysicalDeviceProperties props;
   VkPhysicalDeviceMemoryProperties mem_props;
   uint32_t subgroup_size;
+  uint64_t buf_extra_pad;
   bool has_dmabuf_ext;
   bool has_fp16;
   bool logged_buf_mode;
@@ -467,9 +469,32 @@ static bool vk_init(worker_t *w) {
     return false;
 
   w->udmabuf_fd = open("/dev/udmabuf", O_RDWR | O_CLOEXEC);
-  fprintf(stderr, "kido-vk-worker: GPU=%s (subgroup=%u fp16=%d dmabuf=%d udmabuf=%d)\n",
+  if (w->has_dmabuf_ext) {
+    VkExternalMemoryBufferCreateInfo probe_ext = {
+        .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO,
+        .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
+    };
+    VkBufferCreateInfo probe_bci = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .pNext = &probe_ext,
+        .size = w->host_page_size,
+        .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                 VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+    };
+    VkBuffer probe_buf = VK_NULL_HANDLE;
+    if (vkCreateBuffer(w->device, &probe_bci, NULL, &probe_buf) == VK_SUCCESS) {
+      VkMemoryRequirements mr;
+      vkGetBufferMemoryRequirements(w->device, probe_buf, &mr);
+      if (mr.size > w->host_page_size) w->buf_extra_pad = mr.size - w->host_page_size;
+      vkDestroyBuffer(w->device, probe_buf, NULL);
+    }
+  }
+
+  fprintf(stderr, "kido-vk-worker: GPU=%s (subgroup=%u fp16=%d dmabuf=%d udmabuf=%d pad=%llu)\n",
           w->props.deviceName, w->subgroup_size, w->has_fp16 ? 1 : 0,
-          w->has_dmabuf_ext ? 1 : 0, w->udmabuf_fd >= 0 ? 1 : 0);
+          w->has_dmabuf_ext ? 1 : 0, w->udmabuf_fd >= 0 ? 1 : 0,
+          (unsigned long long)w->buf_extra_pad);
   return true;
 }
 
@@ -511,9 +536,10 @@ static void destroy_buffer_slot(worker_t *w, vk_buffer_t *b) {
   if (b->buffer) vkDestroyBuffer(w->device, b->buffer, NULL);
   if (b->memory) vkFreeMemory(w->device, b->memory, NULL);
   if (b->dmabuf_fd >= 0) close(b->dmabuf_fd);
-  if (w->used_bytes >= b->aligned_len) w->used_bytes -= b->aligned_len;
+  uint64_t freelen = b->shm_len ? b->shm_len : b->aligned_len;
+  if (w->used_bytes >= freelen) w->used_bytes -= freelen;
   else w->used_bytes = 0;
-  kmtl_shm_free(&w->shm_alloc, b->shm_offset, b->aligned_len);
+  kmtl_shm_free(&w->shm_alloc, b->shm_offset, freelen);
   memset(b, 0, sizeof(*b));
   b->dmabuf_fd = -1;
 }
@@ -633,17 +659,19 @@ static void dmabuf_sync(int fd, uint64_t flags) {
 
 static bool try_alloc_dmabuf_vk_buffer(worker_t *w,
                                        uint64_t shm_offset,
-                                       uint64_t aligned_len,
+                                       uint64_t buf_len,
+                                       uint64_t shm_len,
                                        VkBuffer *out_buf,
                                        VkDeviceMemory *out_mem,
                                        int *out_dmabuf_fd) {
   if (getenv("KIDO_VK_NO_DMABUF") != NULL) return false;
   if (w->udmabuf_fd < 0 || !w->has_dmabuf_ext || w->shm_fd < 0) return false;
+  if (shm_len < buf_len) return false;
   struct udmabuf_create uc = {
       .memfd = (uint32_t)w->shm_fd,
       .flags = UDMABUF_FLAGS_CLOEXEC,
       .offset = shm_offset,
-      .size = aligned_len,
+      .size = shm_len,
   };
   int dfd = ioctl(w->udmabuf_fd, UDMABUF_CREATE, &uc);
   if (dfd < 0) return false;
@@ -655,7 +683,7 @@ static bool try_alloc_dmabuf_vk_buffer(worker_t *w,
   VkBufferCreateInfo bci = {
       .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
       .pNext = &ext_bci,
-      .size = aligned_len,
+      .size = buf_len,
       .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
                VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
       .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
@@ -679,7 +707,7 @@ static bool try_alloc_dmabuf_vk_buffer(worker_t *w,
   uint32_t valid_bits = mr.memoryTypeBits & fd_props.memoryTypeBits;
   int mtype = find_memory_type(&w->mem_props, valid_bits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
   if (mtype < 0) mtype = find_memory_type(&w->mem_props, valid_bits, 0);
-  if (mtype < 0 || mr.size > aligned_len) {
+  if (mtype < 0 || mr.size > shm_len) {
     vkDestroyBuffer(w->device, buf, NULL);
     close(dfd);
     return false;
@@ -705,7 +733,7 @@ static bool try_alloc_dmabuf_vk_buffer(worker_t *w,
   VkMemoryAllocateInfo mai = {
       .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
       .pNext = &imp,
-      .allocationSize = aligned_len,
+      .allocationSize = shm_len,
       .memoryTypeIndex = (uint32_t)mtype,
   };
   VkDeviceMemory mem = VK_NULL_HANDLE;
@@ -1722,24 +1750,37 @@ static bool handle_rpc(worker_t *w,
     if (aligned_len == 0 || aligned_len > w->shm_size || aligned_len > w->props.limits.maxStorageBufferRange) {
       return send_err(w->sock_fd, KMTL_ERR_NOMEM, "buffer exceeds GPU memory limit", out_cap);
     }
-    if (w->used_bytes > w->shm_size - aligned_len) {
+    uint64_t shm_len = aligned_len;
+    if (w->buf_extra_pad > 0 && w->udmabuf_fd >= 0 && w->has_dmabuf_ext &&
+        getenv("KIDO_VK_NO_DMABUF") == NULL && aligned_len <= w->shm_size - w->buf_extra_pad) {
+      uint64_t padded = align_up(aligned_len + w->buf_extra_pad, w->host_page_size);
+      if (padded != 0 && padded <= w->shm_size && w->used_bytes <= w->shm_size - padded) {
+        shm_len = padded;
+      }
+    }
+    if (w->used_bytes > w->shm_size - shm_len) {
       return send_err(w->sock_fd, KMTL_ERR_NOMEM, "GPU memory quota exhausted", out_cap);
     }
     uint64_t shm_off = 0;
-    if (!kmtl_shm_alloc(&w->shm_alloc, aligned_len, &shm_off)) {
-      return send_err(w->sock_fd, KMTL_ERR_NOSPC, "GPU SHM aperture full or fragmented", out_cap);
+    if (!kmtl_shm_alloc(&w->shm_alloc, shm_len, &shm_off)) {
+      if (shm_len > aligned_len && w->used_bytes <= w->shm_size - aligned_len &&
+          kmtl_shm_alloc(&w->shm_alloc, aligned_len, &shm_off)) {
+        shm_len = aligned_len;
+      } else {
+        return send_err(w->sock_fd, KMTL_ERR_NOSPC, "GPU SHM aperture full or fragmented", out_cap);
+      }
     }
 
-    if (w->shm_base) memset(w->shm_base + shm_off, 0, (size_t)aligned_len);
+    if (w->shm_base) memset(w->shm_base + shm_off, 0, (size_t)shm_len);
 
     VkBuffer buf = VK_NULL_HANDLE;
     VkDeviceMemory mem = VK_NULL_HANDLE;
     void *mapped = NULL;
     int dmabuf_fd = -1;
-    bool is_dmabuf = try_alloc_dmabuf_vk_buffer(w, shm_off, aligned_len, &buf, &mem, &dmabuf_fd);
+    bool is_dmabuf = try_alloc_dmabuf_vk_buffer(w, shm_off, aligned_len, shm_len, &buf, &mem, &dmabuf_fd);
     if (!is_dmabuf) {
       if (!alloc_host_visible_vk_buffer(w, aligned_len, &buf, &mem, &mapped)) {
-        kmtl_shm_free(&w->shm_alloc, shm_off, aligned_len);
+        kmtl_shm_free(&w->shm_alloc, shm_off, shm_len);
         return send_err(w->sock_fd, KMTL_ERR_NOMEM, "Vulkan buffer allocation failed", out_cap);
       }
     }
@@ -1762,7 +1803,7 @@ static bool handle_rpc(worker_t *w,
         vkDestroyBuffer(w->device, buf, NULL);
         vkFreeMemory(w->device, mem, NULL);
         if (dmabuf_fd >= 0) close(dmabuf_fd);
-        kmtl_shm_free(&w->shm_alloc, shm_off, aligned_len);
+        kmtl_shm_free(&w->shm_alloc, shm_off, shm_len);
         return send_err(w->sock_fd, KMTL_ERR_NOMEM, "host OOM", out_cap);
       }
       memset(nb + w->buffers_cap, 0, (ncap - w->buffers_cap) * sizeof(*nb));
@@ -1777,6 +1818,7 @@ static bool handle_rpc(worker_t *w,
     slot->handle = handle;
     slot->client_id = req->client_id;
     slot->shm_offset = shm_off;
+    slot->shm_len = shm_len;
     slot->aligned_len = aligned_len;
     slot->requested_len = req_len;
     slot->is_dmabuf = is_dmabuf;
@@ -1784,7 +1826,7 @@ static bool handle_rpc(worker_t *w,
     slot->buffer = buf;
     slot->memory = mem;
     slot->mapped = mapped;
-    w->used_bytes += aligned_len;
+    w->used_bytes += shm_len;
 
     struct kmtl_resp_hdr resp = {0};
     resp.status = KMTL_OK;
@@ -2258,7 +2300,8 @@ static int run_selftest(void) {
   VkBuffer buf = VK_NULL_HANDLE;
   VkDeviceMemory mem = VK_NULL_HANDLE;
   int dfd = -1;
-  bool dmabuf_ok = try_alloc_dmabuf_vk_buffer(&w, 0, 65536, &buf, &mem, &dfd);
+  uint64_t st_shm = align_up(65536 + w.buf_extra_pad, w.host_page_size);
+  bool dmabuf_ok = try_alloc_dmabuf_vk_buffer(&w, 0, 65536, st_shm, &buf, &mem, &dfd);
   printf("selftest: GPU=%s dmabuf_zero_copy=%s\n", w.props.deviceName, dmabuf_ok ? "YES" : "NO (fallback)");
   if (dmabuf_ok) {
     vkDestroyBuffer(w.device, buf, NULL);
