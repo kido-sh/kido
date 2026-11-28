@@ -24,9 +24,18 @@ pub const KMTL_VIRTIO_DEVICE_ID: u16 = 0x0050;
 pub const KMTL_PCI_CLASS_CODE: u32 = 0x030200;
 
 pub const KMTL_OP_GET_DEVICE_INFO: u32 = 1;
+pub const KMTL_OP_COMMIT_COMMAND_BUFFER: u32 = 40;
 
 pub const KMTL_FRAME_GUEST_RPC: u8 = 0;
 pub const KMTL_FRAME_VMM_RESET: u8 = 1;
+pub const KMTL_FRAME_GUEST_RPC_PREFLUSHED: u8 = 2;
+
+pub trait ShmDirtySync: Send + Sync {
+    /// Clean and invalidate all guest-dirtied BAR4 SHM pages to the ARM64 Point
+    /// of Coherency and re-arm dirty tracking. Returns true iff dirty tracking
+    /// is active and every guest write to SHM is now coherent at PoC.
+    fn sync_dirty_to_poc(&self) -> bool;
+}
 
 pub const KMTL_ERR_NOMEM: i32 = -12;
 pub const KMTL_ERR_INVAL: i32 = -22;
@@ -459,6 +468,7 @@ impl VirtioMetal {
         self: &Arc<Self>,
         vpci: Arc<VirtioPciDevice>,
         _mem: Arc<GuestMemory>,
+        dirty_sync: Option<Arc<dyn ShmDirtySync>>,
     ) -> Result<(), String> {
         let sock = self
             .sock
@@ -476,7 +486,14 @@ impl VirtioMetal {
         let handle = thread::Builder::new()
             .name("metal-rpc".to_string())
             .spawn(move || {
-                metal_worker_loop(sock, rx, vpci_weak, shutdown_flag, desired_reset_gen);
+                metal_worker_loop(
+                    sock,
+                    rx,
+                    vpci_weak,
+                    shutdown_flag,
+                    desired_reset_gen,
+                    dirty_sync,
+                );
             })
             .map_err(|e| format!("spawn metal-rpc thread: {e}"))?;
         *self.worker.lock().unwrap() = Some(handle);
@@ -512,6 +529,7 @@ fn metal_worker_loop(
     vpci_weak: Weak<VirtioPciDevice>,
     shutdown_flag: Arc<AtomicBool>,
     desired_reset_gen: Arc<AtomicU64>,
+    dirty_sync: Option<Arc<dyn ShmDirtySync>>,
 ) {
     let mut sock_dead = false;
     let mut applied_reset_gen = 0u64;
@@ -556,7 +574,15 @@ fn metal_worker_loop(
                 let (resp_hdr, extra) = if sock_dead {
                     (make_error_resp(KMTL_ERR_IO), Vec::new())
                 } else {
-                    match exchange_frame(&mut sock, KMTL_FRAME_GUEST_RPC, &req_hdr, &in_payload, out_cap) {
+                    let opcode = read_u32_le(&req_hdr, 8);
+                    let frame_kind = if opcode == KMTL_OP_COMMIT_COMMAND_BUFFER
+                        && dirty_sync.as_ref().is_some_and(|ds| ds.sync_dirty_to_poc())
+                    {
+                        KMTL_FRAME_GUEST_RPC_PREFLUSHED
+                    } else {
+                        KMTL_FRAME_GUEST_RPC
+                    };
+                    match exchange_frame(&mut sock, frame_kind, &req_hdr, &in_payload, out_cap) {
                         Ok(r) => r,
                         Err(e) => {
                             if !shutdown_flag.load(Ordering::Acquire) {

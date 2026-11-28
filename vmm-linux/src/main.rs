@@ -405,9 +405,16 @@ fn run_vm(cfg: CliConfig) -> Result<(), String> {
             Arc::clone(&mem),
             spi_mux.line(metal_spi, 3),
         ));
-        metal.start_worker(Arc::clone(&metal_vpci), Arc::clone(&mem))?;
         let shm_mapper = vm.shm_mapper(1, metal.shm_backing());
-        let shm_cfg = ShmBarConfig::new(metal.shm_size(), shm_mapper)?;
+        metal.start_worker(
+            Arc::clone(&metal_vpci),
+            Arc::clone(&mem),
+            Some(Arc::clone(&shm_mapper) as Arc<dyn crate::virtio::metal::ShmDirtySync>),
+        )?;
+        let shm_cfg = ShmBarConfig::new(
+            metal.shm_size(),
+            shm_mapper as Arc<dyn crate::pci::ShmRegionMapper>,
+        )?;
         pci_bus.add_virtio_device_with_shm(3, metal_vpci, Some(shm_cfg))?;
         metal_dev = Some(metal);
         4

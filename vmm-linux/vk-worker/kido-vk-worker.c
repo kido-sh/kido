@@ -7,12 +7,17 @@
 #include "../../vmm/kmtl_proto.h"
 #include "../../vmm/kmtl_shm.h"
 #include "msl2glsl.h"
+#ifdef KIDO_HAVE_AIR2SPV
+#include "air2spv.h"
+#include "metallib.h"
+#endif
 
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/dma-buf.h>
 #include <linux/udmabuf.h>
 #include <poll.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -21,15 +26,23 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/prctl.h>
 #include <sys/resource.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 #include <vulkan/vulkan.h>
 
+extern char **environ;
+
 #define KMTL_FRAME_GUEST_RPC 0u
 #define KMTL_FRAME_VMM_RESET 1u
+#define KMTL_FRAME_GUEST_RPC_PREFLUSHED 2u
+#define KMTL_FLUSH_HELPERS 3u
+#define KMTL_FLUSH_PAR_MIN_BYTES (1u << 20)
 #define KMTL_MAX_CLIENTS 256u
 #define KMTL_MAX_PSO_SPECS 16u
 #define KMTL_MAX_DEFERRED_PIPES 256u
@@ -37,6 +50,8 @@
 #define KMTL_DARWIN_PAGE_SIZE 16384u
 #define KMTL_MAX_LIB_SOURCE_BYTES (4u * 1024u * 1024u)
 #define KMTL_MAX_TOTAL_LIB_SOURCE_BYTES (32u * 1024u * 1024u)
+#define KMTL_MAX_TOTAL_LIB_BINARY_BYTES (64u * 1024u * 1024u)
+#define KMTL_MAX_TOTAL_FN_SPIRV_BYTES (64u * 1024u * 1024u)
 #define KMTL_MAX_SHM_BYTES (128ULL << 30)
 #define KMTL_COMPILE_TIMEOUT_MS 15000
 
@@ -64,8 +79,11 @@ typedef struct {
   bool active;
   uint64_t handle;
   uint32_t client_id;
+  bool is_binary;
   char *source;
   size_t source_len;
+  uint8_t *binary;
+  size_t binary_len;
   msl_macro_t *macros;
   char **macro_keys;
   char **macro_vals;
@@ -130,6 +148,25 @@ typedef struct {
   vk_seq_timing_t timings[64];
 } vk_queue_t;
 
+#if defined(__aarch64__)
+typedef struct {
+  pthread_mutex_t mu;
+  pthread_cond_t cv_start;
+  pthread_cond_t cv_done;
+  pthread_t threads[KMTL_FLUSH_HELPERS];
+  uint32_t n_threads;
+  bool initialized;
+  bool init_failed;
+  bool stop;
+  uint64_t gen;
+  uint32_t done;
+  uintptr_t start_addr;
+  size_t total_lines;
+  uint64_t line_size;
+  bool invalidate;
+} flush_pool_t;
+#endif
+
 typedef struct {
   int sock_fd;
   int shm_fd;
@@ -140,7 +177,18 @@ typedef struct {
   kmtl_shm_alloc_t shm_alloc;
   uint64_t used_bytes;
   size_t total_lib_source_bytes;
+  size_t total_lib_binary_bytes;
+  size_t total_fn_spirv_bytes;
   uint64_t next_handle;
+  char self_exe[4096];
+  char glslang_path[4096];
+#ifdef KIDO_HAVE_AIR2SPV
+  int air_sb_fd;
+  pid_t air_sb_pid;
+#endif
+#if defined(__aarch64__)
+  flush_pool_t flush_pool;
+#endif
 
   VkInstance instance;
   VkPhysicalDevice phys_dev;
@@ -160,9 +208,15 @@ typedef struct {
   VkPhysicalDeviceProperties props;
   VkPhysicalDeviceMemoryProperties mem_props;
   uint32_t subgroup_size;
+  uint32_t subgroup_ops;
   uint64_t buf_extra_pad;
   bool has_dmabuf_ext;
   bool has_fp16;
+  bool has_int16;
+  bool has_int8;
+  bool has_storage_16bit;
+  bool has_storage_8bit;
+  bool has_int64;
   bool logged_buf_mode;
   PFN_vkGetMemoryFdPropertiesKHR pfn_get_mem_fd_props;
 
@@ -330,6 +384,15 @@ static bool vk_init(worker_t *w) {
   };
   vkGetPhysicalDeviceProperties2(w->phys_dev, &props2);
   w->subgroup_size = sg_props.subgroupSize ? sg_props.subgroupSize : 16;
+  w->subgroup_ops = 0;
+  if (sg_props.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT) {
+    if (sg_props.supportedOperations & VK_SUBGROUP_FEATURE_BASIC_BIT) w->subgroup_ops |= (1u << 0);
+    if (sg_props.supportedOperations & VK_SUBGROUP_FEATURE_VOTE_BIT) w->subgroup_ops |= (1u << 1);
+    if (sg_props.supportedOperations & VK_SUBGROUP_FEATURE_ARITHMETIC_BIT) w->subgroup_ops |= (1u << 2);
+    if (sg_props.supportedOperations & VK_SUBGROUP_FEATURE_BALLOT_BIT) w->subgroup_ops |= (1u << 3);
+    if (sg_props.supportedOperations & VK_SUBGROUP_FEATURE_SHUFFLE_BIT) w->subgroup_ops |= (1u << 4);
+    if (sg_props.supportedOperations & VK_SUBGROUP_FEATURE_SHUFFLE_RELATIVE_BIT) w->subgroup_ops |= (1u << 5);
+  }
 
   VkPhysicalDeviceVulkan12Features feat12_avail = {
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
@@ -383,6 +446,11 @@ static bool vk_init(worker_t *w) {
       .shaderInt64 = feat2_avail.features.shaderInt64,
   };
   w->has_fp16 = feat12_avail.shaderFloat16 && feat11_avail.storageBuffer16BitAccess;
+  w->has_int16 = feat2_avail.features.shaderInt16 != VK_FALSE;
+  w->has_int8 = feat12_avail.shaderInt8 != VK_FALSE;
+  w->has_storage_16bit = feat11_avail.storageBuffer16BitAccess != VK_FALSE;
+  w->has_storage_8bit = feat12_avail.storageBuffer8BitAccess != VK_FALSE;
+  w->has_int64 = feat2_avail.features.shaderInt64 != VK_FALSE;
 
   float prio = 1.0f;
   VkDeviceQueueCreateInfo qci = {
@@ -546,9 +614,15 @@ static void destroy_buffer_slot(worker_t *w, vk_buffer_t *b) {
 
 static void destroy_library_slot(worker_t *w, vk_library_t *l) {
   if (!l->active) return;
-  if (w->total_lib_source_bytes >= l->source_len) w->total_lib_source_bytes -= l->source_len;
-  else w->total_lib_source_bytes = 0;
-  free(l->source);
+  if (l->is_binary) {
+    if (w->total_lib_binary_bytes >= l->binary_len) w->total_lib_binary_bytes -= l->binary_len;
+    else w->total_lib_binary_bytes = 0;
+    free(l->binary);
+  } else {
+    if (w->total_lib_source_bytes >= l->source_len) w->total_lib_source_bytes -= l->source_len;
+    else w->total_lib_source_bytes = 0;
+    free(l->source);
+  }
   for (size_t i = 0; i < l->num_macros; i++) {
     free(l->macro_keys[i]);
     free(l->macro_vals[i]);
@@ -559,8 +633,10 @@ static void destroy_library_slot(worker_t *w, vk_library_t *l) {
   memset(l, 0, sizeof(*l));
 }
 
-static void destroy_function_slot(vk_function_t *f) {
+static void destroy_function_slot(worker_t *w, vk_function_t *f) {
   if (!f->active) return;
+  if (w->total_fn_spirv_bytes >= f->spirv_bytes) w->total_fn_spirv_bytes -= f->spirv_bytes;
+  else w->total_fn_spirv_bytes = 0;
   free(f->spirv);
   free(f->consts);
   memset(f, 0, sizeof(*f));
@@ -592,7 +668,7 @@ static void close_client(worker_t *w, uint32_t cid) {
     if (w->pipelines[i].active && w->pipelines[i].client_id == cid) destroy_pipeline_slot(w, &w->pipelines[i]);
   }
   for (size_t i = 0; i < w->functions_cap; i++) {
-    if (w->functions[i].active && w->functions[i].client_id == cid) destroy_function_slot(&w->functions[i]);
+    if (w->functions[i].active && w->functions[i].client_id == cid) destroy_function_slot(w, &w->functions[i]);
   }
   for (size_t i = 0; i < w->libraries_cap; i++) {
     if (w->libraries[i].active && w->libraries[i].client_id == cid) destroy_library_slot(w, &w->libraries[i]);
@@ -807,12 +883,317 @@ static bool alloc_host_visible_vk_buffer(worker_t *w,
   return true;
 }
 
-static bool compile_glsl_to_spirv(const char *glsl,
+static void resolve_executable_in_path(const char *name, char *out, size_t out_cap) {
+  out[0] = '\0';
+  const char *path_env = getenv("PATH");
+  if (!path_env || !*path_env) path_env = "/usr/local/bin:/usr/bin:/bin";
+  const char *p = path_env;
+  while (*p) {
+    const char *colon = strchr(p, ':');
+    size_t dlen = colon ? (size_t)(colon - p) : strlen(p);
+    if (dlen > 0 && dlen + 1 + strlen(name) + 1 <= out_cap) {
+      memcpy(out, p, dlen);
+      out[dlen] = '/';
+      strcpy(out + dlen + 1, name);
+      if (access(out, X_OK) == 0) return;
+    }
+    if (!colon) break;
+    p = colon + 1;
+  }
+  out[0] = '\0';
+}
+
+static void close_fds_from(int min_fd) {
+#ifdef SYS_close_range
+  if (syscall(SYS_close_range, (unsigned int)min_fd, ~0U, 0U) == 0) return;
+#endif
+  long max_fd = sysconf(_SC_OPEN_MAX);
+  if (max_fd < 0 || max_fd > 4096) max_fd = 4096;
+  for (int fd = min_fd; fd < (int)max_fd; fd++) {
+    close(fd);
+  }
+}
+
+#ifdef KIDO_HAVE_AIR2SPV
+static void resolve_self_exe(char *out, size_t out_cap) {
+  out[0] = '\0';
+  ssize_t n = readlink("/proc/self/exe", out, out_cap - 1);
+  if (n > 0 && (size_t)n < out_cap) {
+    out[n] = '\0';
+  } else {
+    out[0] = '\0';
+  }
+}
+
+typedef struct {
+  air2spv_caps_t caps;
+  uint32_t mlib_len;
+  uint32_t name_len;
+} air_sb_req_t;
+
+typedef struct {
+  int32_t ok;
+  uint32_t binding_mask;
+  uint32_t readonly_mask;
+  uint32_t payload_len;
+} air_sb_resp_t;
+
+static void air_sandbox_kill(worker_t *w) {
+  if (w->air_sb_fd >= 0) {
+    close(w->air_sb_fd);
+    w->air_sb_fd = -1;
+  }
+  if (w->air_sb_pid > 0) {
+    kill(w->air_sb_pid, SIGKILL);
+    int st = 0;
+    while (waitpid(w->air_sb_pid, &st, 0) < 0 && errno == EINTR) {}
+    w->air_sb_pid = -1;
+  }
+}
+
+static bool sb_send_all_deadline(int fd, const void *buf, size_t len, uint64_t deadline) {
+  const uint8_t *p = (const uint8_t *)buf;
+  size_t done = 0;
+  while (done < len) {
+    uint64_t now = monotonic_ns();
+    if (now >= deadline) return false;
+    int rem_ms = (int)((deadline - now) / 1000000ULL);
+    if (rem_ms < 1) rem_ms = 1;
+    struct pollfd pfd = {.fd = fd, .events = POLLOUT};
+    int pr = poll(&pfd, 1, rem_ms);
+    if (pr < 0) {
+      if (errno == EINTR) continue;
+      return false;
+    }
+    if (pr == 0) return false;
+    ssize_t n = send(fd, p + done, len - done, MSG_NOSIGNAL | MSG_DONTWAIT);
+    if (n < 0) {
+      if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) continue;
+      return false;
+    }
+    if (n == 0) return false;
+    done += (size_t)n;
+  }
+  return true;
+}
+
+static bool sb_recv_all_deadline(int fd, void *buf, size_t len, uint64_t deadline) {
+  uint8_t *p = (uint8_t *)buf;
+  size_t done = 0;
+  while (done < len) {
+    uint64_t now = monotonic_ns();
+    if (now >= deadline) return false;
+    int rem_ms = (int)((deadline - now) / 1000000ULL);
+    if (rem_ms < 1) rem_ms = 1;
+    struct pollfd pfd = {.fd = fd, .events = POLLIN};
+    int pr = poll(&pfd, 1, rem_ms);
+    if (pr < 0) {
+      if (errno == EINTR) continue;
+      return false;
+    }
+    if (pr == 0) return false;
+    ssize_t n = recv(fd, p + done, len - done, MSG_DONTWAIT);
+    if (n < 0) {
+      if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) continue;
+      return false;
+    }
+    if (n == 0) return false;
+    done += (size_t)n;
+  }
+  return true;
+}
+
+static bool air_sandbox_ensure_started(worker_t *w, char *err_buf, size_t err_cap) {
+  if (w->air_sb_fd >= 0 && w->air_sb_pid > 0) return true;
+  if (w->self_exe[0] == '\0') {
+    snprintf(err_buf, err_cap, "unable to resolve self executable for AIR sandbox");
+    return false;
+  }
+  int sv[2];
+  if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sv) != 0) {
+    snprintf(err_buf, err_cap, "socketpair for AIR sandbox failed");
+    return false;
+  }
+  pid_t parent_pid = getpid();
+  pid_t pid = fork();
+  if (pid < 0) {
+    close(sv[0]);
+    close(sv[1]);
+    snprintf(err_buf, err_cap, "fork for AIR sandbox failed");
+    return false;
+  }
+  if (pid == 0) {
+    close(sv[0]);
+    prctl(PR_SET_PDEATHSIG, SIGKILL, 0, 0, 0);
+    if (getppid() != parent_pid) _exit(1);
+    prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+    int devnull = open("/dev/null", O_RDONLY);
+    if (devnull >= 0) {
+      dup2(devnull, STDIN_FILENO);
+      if (devnull > 2 && devnull != sv[1]) close(devnull);
+    }
+    /* Pin sandbox IPC socket to FD 3 and close all higher FDs (GPU/DRM/SHM/control). */
+    if (sv[1] != 3) {
+      if (dup2(sv[1], 3) < 0) _exit(126);
+      close(sv[1]);
+    }
+    if (fcntl(3, F_SETFD, 0) < 0) _exit(126);
+    close_fds_from(4);
+    struct rlimit rl_as = {1024ULL << 20, 1024ULL << 20};
+    struct rlimit rl_fsize = {0, 0};
+    setrlimit(RLIMIT_AS, &rl_as);
+    setrlimit(RLIMIT_FSIZE, &rl_fsize);
+    char *argv[] = {w->self_exe, "--air-sandbox", "--sandbox-fd", "3", NULL};
+    execve(w->self_exe, argv, environ);
+    _exit(127);
+  }
+  close(sv[1]);
+  w->air_sb_fd = sv[0];
+  w->air_sb_pid = pid;
+  return true;
+}
+
+static bool compile_metallib_sandboxed(worker_t *w,
+                                       const uint8_t *mlib,
+                                       size_t mlib_len,
+                                       const char *fn_name,
+                                       const air2spv_caps_t *caps,
+                                       air2spv_result_t *out,
+                                       char *err_buf,
+                                       size_t err_cap) {
+  memset(out, 0, sizeof(*out));
+  size_t name_len = strlen(fn_name);
+  if (mlib_len == 0 || mlib_len > METALLIB_MAX_BYTES || name_len == 0 || name_len > 127u) {
+    snprintf(err_buf, err_cap, "invalid metallib compile request");
+    return false;
+  }
+  if (!air_sandbox_ensure_started(w, err_buf, err_cap)) return false;
+
+  air_sb_req_t req;
+  memset(&req, 0, sizeof(req));
+  req.caps = *caps;
+  req.mlib_len = (uint32_t)mlib_len;
+  req.name_len = (uint32_t)name_len;
+
+  uint64_t deadline = monotonic_ns() + (uint64_t)KMTL_COMPILE_TIMEOUT_MS * 1000000ULL;
+  if (!sb_send_all_deadline(w->air_sb_fd, &req, sizeof(req), deadline) ||
+      !sb_send_all_deadline(w->air_sb_fd, mlib, mlib_len, deadline) ||
+      !sb_send_all_deadline(w->air_sb_fd, fn_name, name_len, deadline)) {
+    air_sandbox_kill(w);
+    snprintf(err_buf, err_cap, "AIR compiler sandbox timed out or crashed while sending input");
+    return false;
+  }
+
+  air_sb_resp_t resp;
+  memset(&resp, 0, sizeof(resp));
+  if (!sb_recv_all_deadline(w->air_sb_fd, &resp, sizeof(resp), deadline)) {
+    air_sandbox_kill(w);
+    snprintf(err_buf, err_cap, "AIR compiler sandbox crashed, exceeded memory limit, or timed out");
+    return false;
+  }
+
+  if (!resp.ok) {
+    size_t elen = resp.payload_len;
+    if (elen > 4096u) {
+      air_sandbox_kill(w);
+      snprintf(err_buf, err_cap, "AIR compiler sandbox protocol error");
+      return false;
+    }
+    char tmp[4097];
+    if (elen > 0 && !sb_recv_all_deadline(w->air_sb_fd, tmp, elen, deadline)) {
+      air_sandbox_kill(w);
+      snprintf(err_buf, err_cap, "AIR compiler sandbox truncated error");
+      return false;
+    }
+    tmp[elen] = '\0';
+    snprintf(err_buf, err_cap, "%s", elen > 0 ? tmp : "AIR compilation failed");
+    return false;
+  }
+
+  if (resp.payload_len < 20u || (resp.payload_len & 3u) != 0 || resp.payload_len > (8u << 20)) {
+    air_sandbox_kill(w);
+    snprintf(err_buf, err_cap, "AIR compiler sandbox returned invalid SPIR-V size");
+    return false;
+  }
+  uint32_t *words = malloc(resp.payload_len);
+  if (!words) {
+    air_sandbox_kill(w);
+    snprintf(err_buf, err_cap, "host OOM receiving SPIR-V from AIR sandbox");
+    return false;
+  }
+  if (!sb_recv_all_deadline(w->air_sb_fd, words, resp.payload_len, deadline)) {
+    free(words);
+    air_sandbox_kill(w);
+    snprintf(err_buf, err_cap, "AIR compiler sandbox truncated SPIR-V payload");
+    return false;
+  }
+  out->spirv = words;
+  out->spirv_bytes = resp.payload_len;
+  out->binding_mask = resp.binding_mask;
+  out->readonly_mask = resp.readonly_mask;
+  return true;
+}
+
+static int run_air_sandbox(int fd) {
+  if (fd < 0) return 2;
+  for (;;) {
+    air_sb_req_t req;
+    if (!read_full(fd, &req, sizeof(req))) break;
+    if (req.mlib_len == 0 || req.mlib_len > METALLIB_MAX_BYTES || req.name_len == 0 || req.name_len > 127u) {
+      break;
+    }
+    uint8_t *mlib = malloc(req.mlib_len);
+    char fn_name[128];
+    if (!mlib) break;
+    if (!read_full(fd, mlib, req.mlib_len) || !read_full(fd, fn_name, req.name_len)) {
+      free(mlib);
+      break;
+    }
+    fn_name[req.name_len] = '\0';
+
+    air2spv_result_t ar = {0};
+    char err[1024] = {0};
+    bool ok = air2spv_compile_metallib(mlib, req.mlib_len, fn_name, &req.caps, &ar, err, sizeof(err));
+    free(mlib);
+
+    air_sb_resp_t resp;
+    memset(&resp, 0, sizeof(resp));
+    if (ok && ar.spirv_bytes <= (8u << 20)) {
+      resp.ok = 1;
+      resp.binding_mask = ar.binding_mask;
+      resp.readonly_mask = ar.readonly_mask;
+      resp.payload_len = (uint32_t)ar.spirv_bytes;
+      bool wok = write_full(fd, &resp, sizeof(resp)) &&
+                 (ar.spirv_bytes == 0 || write_full(fd, ar.spirv, ar.spirv_bytes));
+      free(ar.spirv);
+      if (!wok) break;
+    } else {
+      if (ok) {
+        free(ar.spirv);
+        snprintf(err, sizeof(err), "AIR SPIR-V output exceeded 8 MiB limit");
+      }
+      size_t elen = strlen(err);
+      resp.ok = 0;
+      resp.payload_len = (uint32_t)elen;
+      if (!write_full(fd, &resp, sizeof(resp)) || (elen > 0 && !write_full(fd, err, elen))) break;
+    }
+  }
+  close(fd);
+  return 0;
+}
+#endif
+
+static bool compile_glsl_to_spirv(const char *glslang_path,
+                                  const char *glsl,
                                   size_t glsl_len,
                                   uint32_t **out_words,
                                   size_t *out_bytes,
                                   char *err_buf,
                                   size_t err_cap) {
+  if (!glslang_path || glslang_path[0] == '\0') {
+    snprintf(err_buf, err_cap, "glslangValidator not found in PATH");
+    return false;
+  }
   char tmp_dir[] = "/tmp/kido-vk-XXXXXX";
   if (!mkdtemp(tmp_dir)) {
     snprintf(err_buf, err_cap, "mkdtemp failed: %s", strerror(errno));
@@ -847,6 +1228,7 @@ static bool compile_glsl_to_spirv(const char *glsl,
     return false;
   }
 
+  pid_t parent_pid = getpid();
   pid_t pid = fork();
   if (pid < 0) {
     close(pfd[0]);
@@ -858,23 +1240,27 @@ static bool compile_glsl_to_spirv(const char *glsl,
   }
   if (pid == 0) {
     close(pfd[0]);
+    prctl(PR_SET_PDEATHSIG, SIGKILL, 0, 0, 0);
+    if (getppid() != parent_pid) _exit(1);
+    prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
     int devnull = open("/dev/null", O_RDONLY);
     if (devnull >= 0) {
       dup2(devnull, STDIN_FILENO);
-      if (devnull > 2) close(devnull);
+      if (devnull > 2 && devnull != pfd[1]) close(devnull);
     }
     dup2(pfd[1], STDOUT_FILENO);
     dup2(pfd[1], STDERR_FILENO);
-    close(pfd[1]);
+    if (pfd[1] > 2) close(pfd[1]);
+    close_fds_from(3);
     struct rlimit rl_cpu = {15, 15};
     struct rlimit rl_as = {512ULL << 20, 512ULL << 20};
     struct rlimit rl_fsize = {32ULL << 20, 32ULL << 20};
     setrlimit(RLIMIT_CPU, &rl_cpu);
     setrlimit(RLIMIT_AS, &rl_as);
     setrlimit(RLIMIT_FSIZE, &rl_fsize);
-    char *argv[] = {"glslangValidator", "-V", "--target-env", "vulkan1.3", "-S", "comp", "-o", spv_path, comp_path,
+    char *argv[] = {(char *)glslang_path, "-V", "--target-env", "vulkan1.3", "-S", "comp", "-o", spv_path, comp_path,
                     NULL};
-    execvp("glslangValidator", argv);
+    execve(glslang_path, argv, environ);
     _exit(127);
   }
 
@@ -1082,6 +1468,7 @@ static uint64_t arm64_dcache_line_size(void) {
 }
 
 static void arm64_clean_dcache_poc(const void *ptr, size_t len) {
+  if (len == 0) return;
   uint64_t line = arm64_dcache_line_size();
   uintptr_t cur = (uintptr_t)ptr & ~(uintptr_t)(line - 1);
   uintptr_t end = (uintptr_t)ptr + len;
@@ -1092,6 +1479,7 @@ static void arm64_clean_dcache_poc(const void *ptr, size_t len) {
 }
 
 static void arm64_clean_inv_dcache_poc(const void *ptr, size_t len) {
+  if (len == 0) return;
   uint64_t line = arm64_dcache_line_size();
   uintptr_t cur = (uintptr_t)ptr & ~(uintptr_t)(line - 1);
   uintptr_t end = (uintptr_t)ptr + len;
@@ -1099,6 +1487,162 @@ static void arm64_clean_inv_dcache_poc(const void *ptr, size_t len) {
     __asm__ volatile("dc civac, %0" : : "r"(cur) : "memory");
   }
   __asm__ volatile("dsb sy" : : : "memory");
+}
+
+typedef struct {
+  flush_pool_t *pool;
+  uint32_t idx;
+} flush_helper_arg_t;
+
+static void arm64_flush_lines(uintptr_t start_addr, size_t first_line, size_t end_line, uint64_t line, bool inv) {
+  uintptr_t cur = start_addr + first_line * (uintptr_t)line;
+  uintptr_t end = start_addr + end_line * (uintptr_t)line;
+  if (inv) {
+    for (; cur < end; cur += line) {
+      __asm__ volatile("dc civac, %0" : : "r"(cur) : "memory");
+    }
+  } else {
+    for (; cur < end; cur += line) {
+      __asm__ volatile("dc cvac, %0" : : "r"(cur) : "memory");
+    }
+  }
+  __asm__ volatile("dsb sy" : : : "memory");
+}
+
+static void *flush_helper_main(void *opaque) {
+  flush_helper_arg_t *arg = (flush_helper_arg_t *)opaque;
+  flush_pool_t *p = arg->pool;
+  uint32_t my_idx = arg->idx;
+  free(arg);
+
+  uint64_t seen_gen = 0;
+  for (;;) {
+    pthread_mutex_lock(&p->mu);
+    while (!p->stop && p->gen == seen_gen) {
+      pthread_cond_wait(&p->cv_start, &p->mu);
+    }
+    if (p->stop) {
+      pthread_mutex_unlock(&p->mu);
+      return NULL;
+    }
+    seen_gen = p->gen;
+    uintptr_t start_addr = p->start_addr;
+    size_t total_lines = p->total_lines;
+    uint64_t line_size = p->line_size;
+    bool inv = p->invalidate;
+    uint32_t chunks = p->n_threads + 1u;
+    pthread_mutex_unlock(&p->mu);
+
+    size_t l0 = (total_lines * (size_t)(my_idx + 1u)) / (size_t)chunks;
+    size_t l1 = (total_lines * (size_t)(my_idx + 2u)) / (size_t)chunks;
+    if (l1 > l0) {
+      arm64_flush_lines(start_addr, l0, l1, line_size, inv);
+    }
+
+    pthread_mutex_lock(&p->mu);
+    p->done++;
+    if (p->done == p->n_threads) {
+      pthread_cond_signal(&p->cv_done);
+    }
+    pthread_mutex_unlock(&p->mu);
+  }
+}
+
+static void flush_pool_ensure_init(worker_t *w) {
+  flush_pool_t *p = &w->flush_pool;
+  if (p->initialized || p->init_failed) return;
+  if (pthread_mutex_init(&p->mu, NULL) != 0) {
+    p->init_failed = true;
+    return;
+  }
+  if (pthread_cond_init(&p->cv_start, NULL) != 0) {
+    pthread_mutex_destroy(&p->mu);
+    p->init_failed = true;
+    return;
+  }
+  if (pthread_cond_init(&p->cv_done, NULL) != 0) {
+    pthread_cond_destroy(&p->cv_start);
+    pthread_mutex_destroy(&p->mu);
+    p->init_failed = true;
+    return;
+  }
+  p->initialized = true;
+  long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
+  uint32_t want = (ncpu >= 4) ? KMTL_FLUSH_HELPERS : (ncpu > 1 ? (uint32_t)(ncpu - 1) : 0u);
+  for (uint32_t i = 0; i < want; i++) {
+    flush_helper_arg_t *arg = malloc(sizeof(*arg));
+    if (!arg) break;
+    arg->pool = p;
+    arg->idx = i;
+    if (pthread_create(&p->threads[p->n_threads], NULL, flush_helper_main, arg) != 0) {
+      free(arg);
+      break;
+    }
+    p->n_threads++;
+  }
+}
+
+static void flush_pool_destroy(worker_t *w) {
+  flush_pool_t *p = &w->flush_pool;
+  if (!p->initialized) return;
+  if (p->n_threads > 0) {
+    pthread_mutex_lock(&p->mu);
+    p->stop = true;
+    pthread_cond_broadcast(&p->cv_start);
+    pthread_mutex_unlock(&p->mu);
+    for (uint32_t i = 0; i < p->n_threads; i++) {
+      pthread_join(p->threads[i], NULL);
+    }
+    p->n_threads = 0;
+  }
+  pthread_cond_destroy(&p->cv_done);
+  pthread_cond_destroy(&p->cv_start);
+  pthread_mutex_destroy(&p->mu);
+  p->stop = false;
+  p->initialized = false;
+}
+
+static void arm64_flush_poc_parallel(worker_t *w, const void *ptr, size_t len, bool invalidate) {
+  if (len == 0) return;
+  if (len < KMTL_FLUSH_PAR_MIN_BYTES) {
+    if (invalidate) arm64_clean_inv_dcache_poc(ptr, len);
+    else arm64_clean_dcache_poc(ptr, len);
+    return;
+  }
+  flush_pool_ensure_init(w);
+  flush_pool_t *p = &w->flush_pool;
+  if (p->n_threads == 0) {
+    if (invalidate) arm64_clean_inv_dcache_poc(ptr, len);
+    else arm64_clean_dcache_poc(ptr, len);
+    return;
+  }
+  uint64_t line = arm64_dcache_line_size();
+  uintptr_t start = (uintptr_t)ptr & ~(uintptr_t)(line - 1);
+  uintptr_t end = ((uintptr_t)ptr + len + (uintptr_t)(line - 1)) & ~(uintptr_t)(line - 1);
+  if (end <= start) return;
+  size_t total_lines = (size_t)((end - start) / line);
+  uint32_t chunks = p->n_threads + 1u;
+
+  pthread_mutex_lock(&p->mu);
+  p->start_addr = start;
+  p->total_lines = total_lines;
+  p->line_size = line;
+  p->invalidate = invalidate;
+  p->done = 0;
+  p->gen++;
+  pthread_cond_broadcast(&p->cv_start);
+  pthread_mutex_unlock(&p->mu);
+
+  size_t l1 = total_lines / (size_t)chunks;
+  if (l1 > 0) {
+    arm64_flush_lines(start, 0, l1, line, invalidate);
+  }
+
+  pthread_mutex_lock(&p->mu);
+  while (p->done < p->n_threads) {
+    pthread_cond_wait(&p->cv_done, &p->mu);
+  }
+  pthread_mutex_unlock(&p->mu);
 }
 #endif
 
@@ -1154,7 +1698,8 @@ static bool handle_commit(worker_t *w,
                           const struct kmtl_req_hdr *req,
                           const uint8_t *stream,
                           uint32_t stream_len,
-                          uint32_t out_cap) {
+                          uint32_t out_cap,
+                          bool host_preflushed) {
   if (!has_client(w, req->client_id)) {
     return send_err(w->sock_fd, KMTL_ERR_PERM, "unknown client", out_cap);
   }
@@ -1597,12 +2142,8 @@ static bool handle_commit(worker_t *w,
     vk_buffer_t *b = touched[i];
     if (b->is_dmabuf) {
 #if defined(__aarch64__)
-      if (w->shm_base) {
-        if (touched_written[i]) {
-          arm64_clean_inv_dcache_poc(w->shm_base + b->shm_offset, (size_t)b->aligned_len);
-        } else {
-          arm64_clean_dcache_poc(w->shm_base + b->shm_offset, (size_t)b->aligned_len);
-        }
+      if (!host_preflushed && w->shm_base) {
+        arm64_flush_poc_parallel(w, w->shm_base + b->shm_offset, (size_t)b->aligned_len, touched_written[i]);
       }
 #else
       dmabuf_sync(b->dmabuf_fd, DMA_BUF_SYNC_END | DMA_BUF_SYNC_RW);
@@ -1647,7 +2188,7 @@ static bool handle_commit(worker_t *w,
     if (b->is_dmabuf) {
 #if defined(__aarch64__)
       if (touched_written[i] && w->shm_base) {
-        arm64_clean_inv_dcache_poc(w->shm_base + b->shm_offset, (size_t)b->aligned_len);
+        arm64_flush_poc_parallel(w, w->shm_base + b->shm_offset, (size_t)b->aligned_len, true);
       }
 #else
       dmabuf_sync(b->dmabuf_fd, DMA_BUF_SYNC_START | DMA_BUF_SYNC_RW);
@@ -1688,11 +2229,14 @@ static bool handle_rpc(worker_t *w,
     struct kmtl_resp_hdr resp = {0};
     return send_resp(w->sock_fd, resp, NULL, 0, out_cap);
   }
-  if (frame_kind != KMTL_FRAME_GUEST_RPC) {
+  if (frame_kind != KMTL_FRAME_GUEST_RPC && frame_kind != KMTL_FRAME_GUEST_RPC_PREFLUSHED) {
     return send_err(w->sock_fd, KMTL_ERR_INVAL, "unknown frame kind", out_cap);
   }
   if (req->magic != KMTL_MAGIC || req->version != KMTL_PROTO_VERSION) {
     return send_err(w->sock_fd, KMTL_ERR_INVAL, "bad magic or protocol version", out_cap);
+  }
+  if (frame_kind == KMTL_FRAME_GUEST_RPC_PREFLUSHED && req->opcode != KMTL_OP_COMMIT_COMMAND_BUFFER) {
+    return send_err(w->sock_fd, KMTL_ERR_INVAL, "preflushed frame only valid for commit", out_cap);
   }
 
   switch (req->opcode) {
@@ -1712,7 +2256,11 @@ static bool handle_rpc(worker_t *w,
     info.max_threads_per_threadgroup[2] = w->props.limits.maxComputeWorkGroupSize[2];
     info.max_threadgroup_memory_length = w->props.limits.maxComputeSharedMemorySize;
     info.host_page_size = w->host_page_size;
-    info.flags = KMTL_FEAT_UNIFIED_MEMORY;
+    info.flags = KMTL_FEAT_UNIFIED_MEMORY
+#ifdef KIDO_HAVE_AIR2SPV
+                 | KMTL_FEAT_NATIVE_METALLIB
+#endif
+        ;
     struct kmtl_resp_hdr resp = {0};
     return send_resp(w->sock_fd, resp, &info, (uint32_t)sizeof(info), out_cap);
   }
@@ -1784,6 +2332,12 @@ static bool handle_rpc(worker_t *w,
         return send_err(w->sock_fd, KMTL_ERR_NOMEM, "Vulkan buffer allocation failed", out_cap);
       }
     }
+#if defined(__aarch64__)
+    else if (w->shm_base) {
+      /* Host memset(0) does not mark KVM Stage-2 dirty pages; publish zeroed pages to PoC once. */
+      arm64_flush_poc_parallel(w, w->shm_base + shm_off, (size_t)shm_len, true);
+    }
+#endif
     if (!w->logged_buf_mode) {
       w->logged_buf_mode = true;
       fprintf(stderr, "kido-vk-worker: buffer mode = %s\n",
@@ -1956,8 +2510,67 @@ static bool handle_rpc(worker_t *w,
     return send_err(w->sock_fd, KMTL_ERR_INVAL, "malformed compile macros", out_cap);
   }
 
-  case KMTL_OP_CREATE_LIBRARY_DATA:
-    return send_err(w->sock_fd, KMTL_ERR_UNSUPP, "Vulkan backend requires MSL source (newLibraryWithSource:)", out_cap);
+  case KMTL_OP_CREATE_LIBRARY_DATA: {
+#ifdef KIDO_HAVE_AIR2SPV
+    if (!has_client(w, req->client_id)) return send_err(w->sock_fd, KMTL_ERR_PERM, "unknown client", out_cap);
+    if (count_client_libraries(w, req->client_id) >= KMTL_MAX_LIBS_PER_CLIENT) {
+      return send_err(w->sock_fd, KMTL_ERR_NOMEM, "library limit reached", out_cap);
+    }
+    if (!in_payload || in_len == 0 || in_len > METALLIB_MAX_BYTES) {
+      return send_err(w->sock_fd, KMTL_ERR_INVAL, "metallib payload empty or oversized", out_cap);
+    }
+    if (w->total_lib_binary_bytes > KMTL_MAX_TOTAL_LIB_BINARY_BYTES - in_len) {
+      return send_err(w->sock_fd, KMTL_ERR_NOMEM, "binary library memory quota exhausted", out_cap);
+    }
+    metallib_index_t midx = {0};
+    char perr[512] = {0};
+    if (!metallib_parse(in_payload, in_len, &midx, perr, sizeof(perr))) {
+      return send_err(w->sock_fd, KMTL_ERR_COMPILE, perr, out_cap);
+    }
+
+    char names_buf[16384];
+    size_t names_len = metallib_encode_compute_names(&midx, names_buf, sizeof(names_buf));
+    metallib_index_free(&midx);
+
+    uint8_t *bin_copy = malloc(in_len);
+    if (!bin_copy) return send_err(w->sock_fd, KMTL_ERR_NOMEM, "host OOM", out_cap);
+    memcpy(bin_copy, in_payload, in_len);
+
+    size_t idx = w->libraries_cap;
+    for (size_t i = 0; i < w->libraries_cap; i++) {
+      if (!w->libraries[i].active) { idx = i; break; }
+    }
+    if (idx == w->libraries_cap) {
+      size_t ncap = w->libraries_cap ? w->libraries_cap * 2 : 32;
+      vk_library_t *nl = realloc(w->libraries, ncap * sizeof(*nl));
+      if (!nl) {
+        free(bin_copy);
+        return send_err(w->sock_fd, KMTL_ERR_NOMEM, "host OOM", out_cap);
+      }
+      memset(nl + w->libraries_cap, 0, (ncap - w->libraries_cap) * sizeof(*nl));
+      w->libraries = nl;
+      w->libraries_cap = ncap;
+    }
+
+    uint64_t handle = w->next_handle++;
+    vk_library_t *lib = &w->libraries[idx];
+    memset(lib, 0, sizeof(*lib));
+    lib->active = true;
+    lib->handle = handle;
+    lib->client_id = req->client_id;
+    lib->is_binary = true;
+    lib->binary = bin_copy;
+    lib->binary_len = in_len;
+    w->total_lib_binary_bytes += in_len;
+
+    struct kmtl_resp_hdr resp = {0};
+    resp.status = KMTL_OK;
+    resp.handle = handle;
+    return send_resp(w->sock_fd, resp, names_buf, (uint32_t)names_len, out_cap);
+#else
+    return send_err(w->sock_fd, KMTL_ERR_UNSUPP, "Vulkan backend built without AIR metallib support", out_cap);
+#endif
+  }
 
   case KMTL_OP_DESTROY_LIBRARY: {
     vk_library_t *l = find_library(w, req->handle, req->client_id);
@@ -2024,26 +2637,65 @@ static bool handle_rpc(worker_t *w,
       }
     }
 
-    msl_translate_result_t tr;
-    char err[1024] = {0};
-    if (!msl_translate_kernel(lib->source, lib->source_len, lib->macros, lib->num_macros, fn_name, &tr, err,
-                              sizeof(err))) {
-      free(consts);
-      return send_err(w->sock_fd, KMTL_ERR_COMPILE, err, out_cap);
-    }
-
     uint32_t *spirv = NULL;
     size_t spirv_bytes = 0;
-    if (!compile_glsl_to_spirv(tr.glsl, tr.glsl_len, &spirv, &spirv_bytes, err, sizeof(err))) {
-      fprintf(stderr, "kido-vk-worker: GLSL compile error for %s: %.512s\n", fn_name, err);
-      if (getenv("KIDO_VK_DEBUG_SHADER") != NULL) {
-        fprintf(stderr, "--- GLSL ---\n%.4096s\n", tr.glsl);
+    uint32_t binding_mask = 0;
+    uint32_t readonly_mask = 0;
+    char err[1024] = {0};
+
+    if (lib->is_binary) {
+#ifdef KIDO_HAVE_AIR2SPV
+      air2spv_caps_t caps = {
+          .has_float16 = w->has_fp16,
+          .has_int16 = w->has_int16,
+          .has_int8 = w->has_int8,
+          .has_storage_16bit = w->has_storage_16bit,
+          .has_storage_8bit = w->has_storage_8bit,
+          .has_int64 = w->has_int64,
+          .max_workgroup_memory = w->props.limits.maxComputeSharedMemorySize,
+          .subgroup_ops = w->subgroup_ops,
+      };
+      air2spv_result_t ar = {0};
+      if (!compile_metallib_sandboxed(w, lib->binary, lib->binary_len, fn_name, &caps, &ar, err, sizeof(err))) {
+        fprintf(stderr, "kido-vk-worker: AIR compile error for %s: %.512s\n", fn_name, err);
+        free(consts);
+        return send_err(w->sock_fd, KMTL_ERR_COMPILE, err, out_cap);
+      }
+      spirv = ar.spirv;
+      spirv_bytes = ar.spirv_bytes;
+      binding_mask = ar.binding_mask;
+      readonly_mask = ar.readonly_mask;
+#else
+      free(consts);
+      return send_err(w->sock_fd, KMTL_ERR_UNSUPP, "binary metallib not enabled", out_cap);
+#endif
+    } else {
+      msl_translate_result_t tr;
+      if (!msl_translate_kernel(lib->source, lib->source_len, lib->macros, lib->num_macros, fn_name, &tr, err,
+                                sizeof(err))) {
+        free(consts);
+        return send_err(w->sock_fd, KMTL_ERR_COMPILE, err, out_cap);
+      }
+      if (!compile_glsl_to_spirv(w->glslang_path, tr.glsl, tr.glsl_len, &spirv, &spirv_bytes, err, sizeof(err))) {
+        fprintf(stderr, "kido-vk-worker: GLSL compile error for %s: %.512s\n", fn_name, err);
+        if (getenv("KIDO_VK_DEBUG_SHADER") != NULL) {
+          fprintf(stderr, "--- GLSL ---\n%.4096s\n", tr.glsl);
+        }
+        free(tr.glsl);
+        free(consts);
+        return send_err(w->sock_fd, KMTL_ERR_COMPILE, err, out_cap);
       }
       free(tr.glsl);
-      free(consts);
-      return send_err(w->sock_fd, KMTL_ERR_COMPILE, err, out_cap);
+      binding_mask = tr.binding_mask;
+      readonly_mask = tr.readonly_mask;
     }
-    free(tr.glsl);
+
+    if (spirv_bytes > KMTL_MAX_TOTAL_FN_SPIRV_BYTES ||
+        w->total_fn_spirv_bytes > KMTL_MAX_TOTAL_FN_SPIRV_BYTES - spirv_bytes) {
+      free(spirv);
+      free(consts);
+      return send_err(w->sock_fd, KMTL_ERR_NOMEM, "compiled function SPIR-V memory quota exhausted", out_cap);
+    }
 
     size_t idx = w->functions_cap;
     for (size_t i = 0; i < w->functions_cap; i++) {
@@ -2070,10 +2722,11 @@ static bool handle_rpc(worker_t *w,
     snprintf(fn->name, sizeof(fn->name), "%s", fn_name);
     fn->spirv = spirv;
     fn->spirv_bytes = spirv_bytes;
-    fn->binding_mask = tr.binding_mask;
-    fn->readonly_mask = tr.readonly_mask;
+    fn->binding_mask = binding_mask;
+    fn->readonly_mask = readonly_mask;
     fn->consts = consts;
     fn->num_consts = fr.num_constants;
+    w->total_fn_spirv_bytes += spirv_bytes;
 
     struct kmtl_resp_hdr resp = {0};
     resp.status = KMTL_OK;
@@ -2084,7 +2737,7 @@ static bool handle_rpc(worker_t *w,
   case KMTL_OP_DESTROY_FUNCTION: {
     vk_function_t *f = find_function(w, req->handle, req->client_id);
     if (!f) return send_err(w->sock_fd, KMTL_ERR_NOENT, "unknown function handle", out_cap);
-    destroy_function_slot(f);
+    destroy_function_slot(w, f);
     struct kmtl_resp_hdr resp = {0};
     return send_resp(w->sock_fd, resp, NULL, 0, out_cap);
   }
@@ -2248,7 +2901,7 @@ static bool handle_rpc(worker_t *w,
   }
 
   case KMTL_OP_COMMIT_COMMAND_BUFFER:
-    return handle_commit(w, req, in_payload, in_len, out_cap);
+    return handle_commit(w, req, in_payload, in_len, out_cap, frame_kind == KMTL_FRAME_GUEST_RPC_PREFLUSHED);
 
   case KMTL_OP_WAIT_QUEUE: {
     vk_queue_t *q = find_queue(w, req->handle, req->client_id);
@@ -2324,7 +2977,8 @@ static int run_selftest(void) {
   }
   uint32_t *spv = NULL;
   size_t spv_len = 0;
-  if (!compile_glsl_to_spirv(tr.glsl, tr.glsl_len, &spv, &spv_len, err, sizeof(err))) {
+  resolve_executable_in_path("glslangValidator", w.glslang_path, sizeof(w.glslang_path));
+  if (!compile_glsl_to_spirv(w.glslang_path, tr.glsl, tr.glsl_len, &spv, &spv_len, err, sizeof(err))) {
     fprintf(stderr, "selftest spirv failed: %s\n", err);
     return 1;
   }
@@ -2339,6 +2993,19 @@ static int run_selftest(void) {
 }
 
 int main(int argc, char **argv) {
+  signal(SIGPIPE, SIG_IGN);
+#ifdef KIDO_HAVE_AIR2SPV
+  for (int i = 1; i < argc; i++) {
+    if (strcmp(argv[i], "--air-sandbox") == 0) {
+      int sb_fd = -1;
+      for (int j = 1; j < argc; j++) {
+        if (strcmp(argv[j], "--sandbox-fd") == 0 && j + 1 < argc) sb_fd = atoi(argv[++j]);
+      }
+      return run_air_sandbox(sb_fd);
+    }
+  }
+#endif
+
   int sock_fd = -1;
   int shm_fd = -1;
   uint64_t shm_bytes = 0;
@@ -2354,7 +3021,7 @@ int main(int argc, char **argv) {
     return 2;
   }
 
-  /* Ensure sock_fd and shm_fd are never inherited by glslangValidator child processes. */
+  /* Ensure sock_fd and shm_fd are never inherited by glslangValidator or AIR sandbox children. */
   fcntl(sock_fd, F_SETFD, FD_CLOEXEC);
   fcntl(shm_fd, F_SETFD, FD_CLOEXEC);
 
@@ -2369,10 +3036,18 @@ int main(int argc, char **argv) {
   w.sock_fd = sock_fd;
   w.shm_fd = shm_fd;
   w.udmabuf_fd = -1;
+#ifdef KIDO_HAVE_AIR2SPV
+  w.air_sb_fd = -1;
+  w.air_sb_pid = -1;
+#endif
   w.shm_size = shm_bytes;
   w.host_page_size = (uint32_t)getpagesize();
   if (w.host_page_size < KMTL_DARWIN_PAGE_SIZE) w.host_page_size = KMTL_DARWIN_PAGE_SIZE;
   w.next_handle = 1;
+#ifdef KIDO_HAVE_AIR2SPV
+  resolve_self_exe(w.self_exe, sizeof(w.self_exe));
+#endif
+  resolve_executable_in_path("glslangValidator", w.glslang_path, sizeof(w.glslang_path));
 
   w.shm_base = mmap(NULL, (size_t)shm_bytes, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
   if (w.shm_base == MAP_FAILED) {
@@ -2414,6 +3089,12 @@ int main(int argc, char **argv) {
   }
 
   reset_all(&w);
+#ifdef KIDO_HAVE_AIR2SPV
+  air_sandbox_kill(&w);
+#endif
+#if defined(__aarch64__)
+  flush_pool_destroy(&w);
+#endif
   vk_destroy_device_objects(&w);
   free(w.buffers);
   free(w.libraries);

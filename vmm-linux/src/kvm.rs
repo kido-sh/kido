@@ -42,7 +42,7 @@ use crate::mmio::MmioBus;
 #[cfg(target_os = "linux")]
 use crate::pci::ShmRegionMapper;
 #[cfg(target_os = "linux")]
-use crate::virtio::metal::ShmBacking;
+use crate::virtio::metal::{ShmBacking, ShmDirtySync};
 
 #[cfg(target_os = "linux")]
 const KVM_API_VERSION: i32 = 12;
@@ -52,6 +52,46 @@ const VGIC_NR_IRQS: u32 = 128;
 const PSTATE_EL1H_MASKED: u64 = 0x3c5;
 #[cfg(target_os = "linux")]
 const KVM_SET_SIGNAL_MASK: libc::c_ulong = 0x4004_ae8b;
+#[cfg(target_os = "linux")]
+const KVM_MEM_LOG_DIRTY_PAGES: u32 = 1 << 0;
+#[cfg(target_os = "linux")]
+const KVM_CAP_MANUAL_DIRTY_LOG_PROTECT2: libc::c_ulong = 168;
+#[cfg(target_os = "linux")]
+const KVM_DIRTY_LOG_MANUAL_PROTECT_ENABLE: u64 = 1 << 0;
+#[cfg(target_os = "linux")]
+const KVM_CHECK_EXTENSION: libc::Ioctl = 0x0000_ae03u32 as libc::Ioctl;
+#[cfg(target_os = "linux")]
+const KVM_GET_DIRTY_LOG: libc::Ioctl = 0x4010_ae42u32 as libc::Ioctl;
+#[cfg(target_os = "linux")]
+const KVM_ENABLE_CAP: libc::Ioctl = 0x4068_aea3u32 as libc::Ioctl;
+#[cfg(target_os = "linux")]
+const KVM_CLEAR_DIRTY_LOG: libc::Ioctl = 0xc018_aec0u32 as libc::Ioctl;
+
+#[cfg(target_os = "linux")]
+#[repr(C)]
+struct KvmEnableCap {
+    cap: u32,
+    flags: u32,
+    args: [u64; 4],
+    pad: [u8; 64],
+}
+
+#[cfg(target_os = "linux")]
+#[repr(C)]
+struct KvmDirtyLog {
+    slot: u32,
+    padding1: u32,
+    dirty_bitmap: *mut libc::c_void,
+}
+
+#[cfg(target_os = "linux")]
+#[repr(C)]
+struct KvmClearDirtyLog {
+    slot: u32,
+    num_pages: u32,
+    first_page: u64,
+    dirty_bitmap: *mut libc::c_void,
+}
 
 #[cfg(target_os = "linux")]
 #[repr(C)]
@@ -133,15 +173,81 @@ impl SpiBackend for KvmSpiBackend {
 }
 
 #[cfg(target_os = "linux")]
+struct ShmMapState {
+    gpa: Option<u64>,
+    dirty_log_enabled: bool,
+    dirty_bitmap: Vec<u64>,
+}
+
+#[cfg(target_os = "linux")]
 pub struct KvmShmMapper {
     vm: Arc<VmFd>,
     slot: u32,
     backing: Arc<ShmBacking>,
-    mapped_gpa: Mutex<Option<u64>>,
+    host_page_size: usize,
+    manual_dirty_clear: bool,
+    allow_dirty_log: bool,
+    state: Mutex<ShmMapState>,
+}
+
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+#[inline]
+fn arm64_dcache_line_size() -> usize {
+    static LINE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let cached = LINE.load(Ordering::Relaxed);
+    if cached != 0 {
+        return cached;
+    }
+    let ctr: u64;
+    unsafe {
+        std::arch::asm!("mrs {}, ctr_el0", out(reg) ctr, options(nomem, nostack, preserves_flags));
+    }
+    let dmin = (ctr >> 16) & 0xf;
+    let mut line = 4usize << dmin;
+    if !(16..=256).contains(&line) {
+        line = 64;
+    }
+    LINE.store(line, Ordering::Relaxed);
+    line
+}
+
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+#[inline]
+fn arm64_clean_inv_dcache_range_no_dsb(ptr: *const u8, len: usize, line: usize) {
+    if len == 0 {
+        return;
+    }
+    let mut cur = (ptr as usize) & !(line - 1);
+    let end = (ptr as usize).saturating_add(len);
+    while cur < end {
+        unsafe {
+            std::arch::asm!("dc civac, {}", in(reg) cur, options(nostack, preserves_flags));
+        }
+        cur += line;
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+#[inline]
+fn arm64_dsb_sy() {
+    unsafe {
+        std::arch::asm!("dsb sy", options(nostack, preserves_flags));
+    }
 }
 
 #[cfg(target_os = "linux")]
 impl KvmShmMapper {
+    fn flush_full_shm_to_poc(&self) {
+        #[cfg(target_arch = "aarch64")]
+        {
+            let size = self.backing.size() as usize;
+            if size > 0 {
+                let line = arm64_dcache_line_size();
+                arm64_clean_inv_dcache_range_no_dsb(self.backing.host_ptr(), size, line);
+                arm64_dsb_sy();
+            }
+        }
+    }
     fn set_region_retry(&self, region: kvm_userspace_memory_region) -> Result<(), String> {
         loop {
             match unsafe { self.vm.set_user_memory_region(region) } {
@@ -156,16 +262,53 @@ impl KvmShmMapper {
             }
         }
     }
+
+    fn ioctl_get_dirty_log(&self, bitmap: &mut [u64]) -> bool {
+        let log = KvmDirtyLog {
+            slot: self.slot,
+            padding1: 0,
+            dirty_bitmap: bitmap.as_mut_ptr() as *mut libc::c_void,
+        };
+        loop {
+            let rc = unsafe { libc::ioctl(self.vm.as_raw_fd(), KVM_GET_DIRTY_LOG, &log) };
+            if rc == 0 {
+                return true;
+            }
+            if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            return false;
+        }
+    }
+
+    fn ioctl_clear_dirty_log(&self, first_page: u64, num_pages: u32, sub_bitmap: &mut [u64]) -> bool {
+        let mut clear = KvmClearDirtyLog {
+            slot: self.slot,
+            num_pages,
+            first_page,
+            dirty_bitmap: sub_bitmap.as_mut_ptr() as *mut libc::c_void,
+        };
+        loop {
+            let rc = unsafe { libc::ioctl(self.vm.as_raw_fd(), KVM_CLEAR_DIRTY_LOG, &mut clear) };
+            if rc == 0 {
+                return true;
+            }
+            if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            return false;
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
 impl ShmRegionMapper for KvmShmMapper {
     fn map(&self, gpa: u64) -> Result<(), String> {
-        let mut guard = self.mapped_gpa.lock().unwrap();
-        if *guard == Some(gpa) {
+        let mut st = self.state.lock().unwrap();
+        if st.gpa == Some(gpa) {
             return Ok(());
         }
-        if let Some(old_gpa) = *guard {
+        if let Some(old_gpa) = st.gpa {
             let unmap = kvm_userspace_memory_region {
                 slot: self.slot,
                 flags: 0,
@@ -174,23 +317,55 @@ impl ShmRegionMapper for KvmShmMapper {
                 userspace_addr: 0,
             };
             self.set_region_retry(unmap)?;
-            *guard = None;
+            // Deleting the memslot destroys its KVM dirty bitmap; flush any guest-dirtied
+            // cache lines to PoC now that Stage-2 mappings are torn down.
+            self.flush_full_shm_to_poc();
+            st.gpa = None;
+            st.dirty_log_enabled = false;
         }
-        let region = kvm_userspace_memory_region {
-            slot: self.slot,
-            flags: 0,
-            guest_phys_addr: gpa,
-            memory_size: self.backing.size(),
-            userspace_addr: self.backing.host_ptr() as u64,
-        };
-        self.set_region_retry(region)?;
-        *guard = Some(gpa);
+        let shm_size = self.backing.size();
+        let can_track = self.allow_dirty_log
+            && self.host_page_size > 0
+            && (shm_size as usize).is_multiple_of(self.host_page_size);
+        let mut dirty_enabled = false;
+        if can_track {
+            let region = kvm_userspace_memory_region {
+                slot: self.slot,
+                flags: KVM_MEM_LOG_DIRTY_PAGES,
+                guest_phys_addr: gpa,
+                memory_size: shm_size,
+                userspace_addr: self.backing.host_ptr() as u64,
+            };
+            if self.set_region_retry(region).is_ok() {
+                dirty_enabled = true;
+            }
+        }
+        if !dirty_enabled {
+            let region = kvm_userspace_memory_region {
+                slot: self.slot,
+                flags: 0,
+                guest_phys_addr: gpa,
+                memory_size: shm_size,
+                userspace_addr: self.backing.host_ptr() as u64,
+            };
+            self.set_region_retry(region)?;
+        }
+        if dirty_enabled {
+            let total_pages = (shm_size as usize) / self.host_page_size;
+            let n_words = total_pages.div_ceil(64);
+            st.dirty_bitmap.clear();
+            st.dirty_bitmap.resize(n_words, 0);
+        } else {
+            st.dirty_bitmap.clear();
+        }
+        st.dirty_log_enabled = dirty_enabled;
+        st.gpa = Some(gpa);
         Ok(())
     }
 
     fn unmap(&self) {
-        let mut guard = self.mapped_gpa.lock().unwrap();
-        if let Some(old_gpa) = *guard {
+        let mut st = self.state.lock().unwrap();
+        if let Some(old_gpa) = st.gpa {
             let unmap = kvm_userspace_memory_region {
                 slot: self.slot,
                 flags: 0,
@@ -199,9 +374,125 @@ impl ShmRegionMapper for KvmShmMapper {
                 userspace_addr: 0,
             };
             match self.set_region_retry(unmap) {
-                Ok(()) => *guard = None,
+                Ok(()) => {
+                    self.flush_full_shm_to_poc();
+                    st.gpa = None;
+                    st.dirty_log_enabled = false;
+                }
                 Err(e) => eprintln!("kido-vmm: {e}"),
             }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl ShmDirtySync for KvmShmMapper {
+    fn sync_dirty_to_poc(&self) -> bool {
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            return false;
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            let mut st = self.state.lock().unwrap();
+            if st.gpa.is_none() || !st.dirty_log_enabled {
+                return false;
+            }
+            let total_pages = (self.backing.size() as usize) / self.host_page_size;
+            let n_words = total_pages.div_ceil(64);
+            if total_pages == 0 || st.dirty_bitmap.len() != n_words {
+                return false;
+            }
+            if !self.ioctl_get_dirty_log(&mut st.dirty_bitmap) {
+                return false;
+            }
+
+            let mut first_nz: Option<usize> = None;
+            let mut last_nz: usize = 0;
+            for (idx, &word) in st.dirty_bitmap.iter().enumerate() {
+                if word != 0 {
+                    if first_nz.is_none() {
+                        first_nz = Some(idx);
+                    }
+                    last_nz = idx;
+                }
+            }
+            let Some(first_w) = first_nz else {
+                return true;
+            };
+
+            // Clear dirty log & write-protect dirty Stage-2 PTEs BEFORE dc civac so any
+            // concurrent guest store after Stage-2 TLBI sets a fresh dirty bit for the next commit.
+            if self.manual_dirty_clear {
+                let first_page = (first_w * 64) as u64;
+                let max_pages = ((last_nz + 1 - first_w) * 64).min(total_pages - first_w * 64);
+                let Ok(max_pages_u32) = u32::try_from(max_pages) else {
+                    return false;
+                };
+                if !self.ioctl_clear_dirty_log(
+                    first_page,
+                    max_pages_u32,
+                    &mut st.dirty_bitmap[first_w..=last_nz],
+                ) {
+                    return false;
+                }
+            }
+
+            let base = self.backing.host_ptr();
+            let page_sz = self.host_page_size;
+            let line = arm64_dcache_line_size();
+            let mut span_start: Option<usize> = None;
+            let mut span_end: usize = 0;
+
+            for w_idx in first_w..=last_nz {
+                let mut word = st.dirty_bitmap[w_idx];
+                if word == 0 {
+                    if let Some(s) = span_start.take() {
+                        let off = s * page_sz;
+                        let len = (span_end - s) * page_sz;
+                        arm64_clean_inv_dcache_range_no_dsb(unsafe { base.add(off) }, len, line);
+                    }
+                    continue;
+                }
+                while word != 0 {
+                    let tz = word.trailing_zeros() as usize;
+                    let page = w_idx * 64 + tz;
+                    if page >= total_pages {
+                        break;
+                    }
+                    let shifted = word >> tz;
+                    let run = (shifted.trailing_ones() as usize).min(total_pages - page);
+                    let run_end = page + run;
+                    match span_start {
+                        Some(_) if span_end == page => {
+                            span_end = run_end;
+                        }
+                        Some(s) => {
+                            let off = s * page_sz;
+                            let len = (span_end - s) * page_sz;
+                            arm64_clean_inv_dcache_range_no_dsb(unsafe { base.add(off) }, len, line);
+                            span_start = Some(page);
+                            span_end = run_end;
+                        }
+                        None => {
+                            span_start = Some(page);
+                            span_end = run_end;
+                        }
+                    }
+                    if tz + run >= 64 {
+                        word = 0;
+                    } else {
+                        word &= !(((1u64 << run) - 1) << tz);
+                    }
+                }
+            }
+            if let Some(s) = span_start {
+                let off = s * page_sz;
+                let len = (span_end - s) * page_sz;
+                arm64_clean_inv_dcache_range_no_dsb(unsafe { base.add(off) }, len, line);
+            }
+            arm64_dsb_sy();
+            true
         }
     }
 }
@@ -230,6 +521,7 @@ pub struct KvmVm {
     mpidrs: Vec<u64>,
     id_aa64mmfr0_el1: u64,
     ipa_bits: u32,
+    manual_dirty_clear: bool,
 }
 
 #[cfg(target_os = "linux")]
@@ -268,6 +560,26 @@ impl KvmVm {
             ));
         }
         let vm = Arc::new(vm);
+
+        let mut manual_dirty_clear = false;
+        let cap_bits = unsafe {
+            libc::ioctl(
+                vm.as_raw_fd(),
+                KVM_CHECK_EXTENSION,
+                KVM_CAP_MANUAL_DIRTY_LOG_PROTECT2,
+            )
+        };
+        if cap_bits > 0 && ((cap_bits as u64) & KVM_DIRTY_LOG_MANUAL_PROTECT_ENABLE) != 0 {
+            let enable = KvmEnableCap {
+                cap: KVM_CAP_MANUAL_DIRTY_LOG_PROTECT2 as u32,
+                flags: 0,
+                args: [KVM_DIRTY_LOG_MANUAL_PROTECT_ENABLE, 0, 0, 0],
+                pad: [0u8; 64],
+            };
+            if unsafe { libc::ioctl(vm.as_raw_fd(), KVM_ENABLE_CAP, &enable) } == 0 {
+                manual_dirty_clear = true;
+            }
+        }
 
         let mem_region = kvm_userspace_memory_region {
             slot: 0,
@@ -324,6 +636,7 @@ impl KvmVm {
             mpidrs,
             id_aa64mmfr0_el1,
             ipa_bits,
+            manual_dirty_clear,
         })
     }
 
@@ -452,12 +765,22 @@ impl KvmVm {
         })
     }
 
-    pub fn shm_mapper(&self, slot: u32, backing: Arc<ShmBacking>) -> Arc<dyn ShmRegionMapper> {
+    pub fn shm_mapper(&self, slot: u32, backing: Arc<ShmBacking>) -> Arc<KvmShmMapper> {
+        let ps = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        let host_page_size = if ps > 0 { ps as usize } else { 4096 };
+        let allow_dirty_log = std::env::var_os("KIDO_VMM_NO_DIRTY_LOG").is_none();
         Arc::new(KvmShmMapper {
             vm: Arc::clone(&self.vm),
             slot,
             backing,
-            mapped_gpa: Mutex::new(None),
+            host_page_size,
+            manual_dirty_clear: self.manual_dirty_clear,
+            allow_dirty_log,
+            state: Mutex::new(ShmMapState {
+                gpa: None,
+                dirty_log_enabled: false,
+                dirty_bitmap: Vec::new(),
+            }),
         })
     }
 
